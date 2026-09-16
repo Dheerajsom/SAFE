@@ -1,5 +1,0 @@
-field,period,period_1,period_2,n1,n2,test,statistic,p_value,significant,significance
-Temperature,First vs Last Month,First Month (2024-08-04 – 2024-09-04),Last Month  (2026-04-28 – 2026-05-28),8915,8641,KS,0.542124,0.0,True,p<0.001 ***
-Temperature,First vs Last Month,First Month (2024-08-04 – 2024-09-04),Last Month  (2026-04-28 – 2026-05-28),8915,8641,AD,4069.403581,0.001,True,p=0.0010 **
-Temperature,First vs Last Month,First Month (2024-08-04 – 2024-09-04),Last Month  (2026-04-28 – 2026-05-28),8915,8641,MWU,64706232.0,0.0,True,p<0.001 ***
-Temperature,First vs Last Month,First Month (2024-08-04 – 2024-09-04),Last Month  (2026-04-28 – 2026-05-28),8915,8641,ES,9996.382736,0.0,True,p<0.001 ***

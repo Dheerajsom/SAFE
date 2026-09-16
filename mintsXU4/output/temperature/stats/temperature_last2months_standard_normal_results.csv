@@ -1,5 +1,0 @@
-field,comparison,sample,test,statistic,p_value,n,mean,std
-Temperature,Last 2 Months,Month 1 (2026-03-28 to 2026-04-28),One-sample KS vs standard normal after z-scoring,0.062985,0.0,9216,21.638648,5.573719
-Temperature,Last 2 Months,Month 1 (2026-03-28 to 2026-04-28),D'Agostino-Pearson normality test,39.152982,0.0,9216,21.638648,5.573719
-Temperature,Last 2 Months,Month 2 (2026-04-28 to 2026-05-28),One-sample KS vs standard normal after z-scoring,0.040109,0.0,8641,23.863395,5.827584
-Temperature,Last 2 Months,Month 2 (2026-04-28 to 2026-05-28),D'Agostino-Pearson normality test,338.756918,0.0,8641,23.863395,5.827584

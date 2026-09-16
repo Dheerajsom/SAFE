@@ -1,5 +1,0 @@
-field,comparison,sample,test,statistic,p_value,n,mean,std
-Temperature,Last 2 Days,Day 1 (2026-05-26),One-sample KS vs standard normal after z-scoring,0.175126,0.0,288,26.519615,4.034915
-Temperature,Last 2 Days,Day 1 (2026-05-26),D'Agostino-Pearson normality test,87.068333,0.0,288,26.519615,4.034915
-Temperature,Last 2 Days,Day 2 (2026-05-27),One-sample KS vs standard normal after z-scoring,0.198122,0.0,288,24.036991,4.010572
-Temperature,Last 2 Days,Day 2 (2026-05-27),D'Agostino-Pearson normality test,35.923675,0.0,288,24.036991,4.010572

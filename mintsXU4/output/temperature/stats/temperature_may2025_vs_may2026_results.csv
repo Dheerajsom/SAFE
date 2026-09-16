@@ -1,5 +1,0 @@
-field,period,period_1,period_2,n1,n2,test,statistic,p_value,significant,significance
-Temperature,May 2025 vs May 2026,May 2025 (2025-05-01 – 2025-05-31),May 2026 (2026-05-01 – 2026-05-31),8928,7777,KS,0.040978,2e-06,True,p<0.001 ***
-Temperature,May 2025 vs May 2026,May 2025 (2025-05-01 – 2025-05-31),May 2026 (2026-05-01 – 2026-05-31),8928,7777,AD,19.697636,0.001,True,p=0.0010 **
-Temperature,May 2025 vs May 2026,May 2025 (2025-05-01 – 2025-05-31),May 2026 (2026-05-01 – 2026-05-31),8928,7777,MWU,34526468.0,0.540994,False,p=0.5410 (ns)
-Temperature,May 2025 vs May 2026,May 2025 (2025-05-01 – 2025-05-31),May 2026 (2026-05-01 – 2026-05-31),8928,7777,ES,142.119806,0.0,True,p<0.001 ***

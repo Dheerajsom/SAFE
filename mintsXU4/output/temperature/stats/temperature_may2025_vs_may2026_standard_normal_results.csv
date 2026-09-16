@@ -1,5 +1,0 @@
-field,comparison,sample,test,statistic,p_value,n,mean,std
-Temperature,May 2025 vs May 2026,May 2025,One-sample KS vs standard normal after z-scoring,0.060212,0.0,8928,24.158399,5.534497
-Temperature,May 2025 vs May 2026,May 2025,D'Agostino-Pearson normality test,622.539749,0.0,8928,24.158399,5.534497
-Temperature,May 2025 vs May 2026,May 2026,One-sample KS vs standard normal after z-scoring,0.029733,2e-06,7777,24.21435,5.874599
-Temperature,May 2025 vs May 2026,May 2026,D'Agostino-Pearson normality test,271.715405,0.0,7777,24.21435,5.874599

@@ -1,2 +1,1 @@
-> Generate animation plots for all PMs with 1-second resolution and 1-min time window
-> Update presentation
+> Data starts around 08/2024

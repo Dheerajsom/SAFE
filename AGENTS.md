@@ -40,11 +40,13 @@ python dataVisualizer.py
 - `safe/stats.py`: Source of truth for `sample_comparison()` — Welch/Levene
   drift tests with effect-size gates and AR(1) effective-sample-size (n_eff)
   correction.
-- `safe/engine.py`: `SensorDrift` streaming engine — hard bounds, robust
-  (median/MAD+IQR) modified z-score, step-change detection, optional
+- `safe/engine.py`: `SensorDrift` streaming engine — hard bounds, frozen-value
+  detection, robust (median/MAD+IQR, per-metric scale floor) modified z-score,
+  step-change detection, optional
   Page-Hinkley layer, windowed drift evaluation. `PageHinkley` is off by
   default because ambient diurnal cycles trigger it daily.
-- `safe/config.py`: `HARD_BOUNDS`, effect-size gates, flat-step thresholds.
+- `safe/config.py`: `HARD_BOUNDS`, effect-size gates, flat-step thresholds,
+  robust-scale floors, freeze thresholds.
 - `safe/loader.py`: InfluxDB-export CSV loading (`load_pivoted_dataframe`) and
   streaming replay (`replay_csv`).
 - `safe/periods.py` + `safe/plotting.py`: period-over-period comparisons and

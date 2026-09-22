@@ -110,6 +110,13 @@ class TestSampleComparison:
         assert sample_comparison(old, new, metric="pm1_0")["mean_shift"] is False
         assert sample_comparison(old, new, metric="shuntVoltage")["mean_shift"] is True
 
+    @pytest.mark.parametrize("pc_bin", ["pc0_1", "pc0_3", "pc0_5", "pc1_0", "pc2_5", "pc5_0", "pc10_0"])
+    def test_particle_count_bins_have_flat_threshold(self, pc_bin):
+        # Counts are particles/L; the generic 0.01 default would flag any move
+        old, new = np.full(50, 500.0), np.full(50, 505.0)
+        assert sample_comparison(old, new, metric=pc_bin)["mean_shift"] is False
+        assert sample_comparison(old, np.full(50, 600.0), metric=pc_bin)["mean_shift"] is True
+
     def test_half_flat_reported(self):
         res = sample_comparison(np.full(100, 5.0), RNG.normal(5, 1, 100))
         assert res["half_flat"] is True

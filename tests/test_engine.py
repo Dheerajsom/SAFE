@@ -141,10 +141,73 @@ class TestWindowedDrift:
         assert "Sensor Drift Detected" not in alert_types(engine)
 
     def test_flat_step_change_between_windows(self):
+        # 100 identical readings would otherwise be flagged as a frozen sensor
         engine = make_engine(window_size=200, enable_page_hinkley=False,
-                             z_threshold=1e9)  # let the flat shift through
+                             z_threshold=1e9, freeze_detection=False)
         feed(engine, [5.0] * 100 + [7.0] * 100)
         assert "Sensor Drift Detected Step-Change" in alert_types(engine)
+
+
+class TestScaleFloor:
+    def test_small_move_off_flat_baseline_is_not_outlier(self):
+        # A held temperature collapses MAD/IQR/std to 0; a 0.05 °C move must
+        # not score as an enormous z-score.
+        engine = make_engine(freeze_detection=False)
+        feed(engine, [20.0] * 40 + [20.05] * 3, metric="temperature")
+        assert "z-score-outlier" not in alert_types(engine)
+
+    def test_large_move_off_flat_baseline_still_flagged(self):
+        engine = make_engine(freeze_detection=False)
+        feed(engine, [20.0] * 40 + [22.0], metric="temperature")
+        assert "z-score-outlier" in alert_types(engine)
+
+    def test_ordinary_readings_after_flat_stretch_are_not_step_change(self):
+        engine = make_engine(freeze_detection=False)
+        feed(engine, [20.0] * 40 + list(20.0 + RNG.normal(0, 0.05, 20)), metric="temperature")
+        assert "Step-Change Detected" not in alert_types(engine)
+
+
+class TestFreeze:
+    def test_repeated_value_for_an_hour_is_frozen(self):
+        engine = make_engine()
+        noisy = list(RNG.normal(20, 0.5, 40))
+        feed(engine, noisy + [21.3] * 20, metric="temperature", step=300)
+        assert alert_types(engine).count("Frozen Sensor Detected") == 1
+        state = engine._states[SENSOR]["temperature"]
+        # At 5-min cadence the hour is reached on the 13th reading; only the
+        # 12 before confirmation reached history
+        assert list(state.buffer).count(21.3) == 12
+
+    def test_short_repeat_is_not_frozen(self):
+        engine = make_engine()
+        # 20 readings but only 19 minutes: under the one-hour minimum
+        feed(engine, list(RNG.normal(20, 0.5, 40)) + [21.3] * 20, metric="temperature", step=60)
+        assert "Frozen Sensor Detected" not in alert_types(engine)
+
+    def test_recovery_restarts_tracking_without_step_change(self):
+        engine = make_engine()
+        feed(engine, list(RNG.normal(20, 0.5, 40)) + [21.3] * 30, metric="temperature", step=300)
+        engine.alerts.clear()
+        # Live readings return far from the stale pre-freeze level
+        feed(engine, list(RNG.normal(30, 0.5, 20)), metric="temperature",
+             start_ts=1_800_000_000, step=300)
+        types = alert_types(engine)
+        assert types.count("Frozen Sensor Recovered") == 1
+        assert "Step-Change Detected" not in types
+        assert "z-score-outlier" not in types
+        state = engine._states[SENSOR]["temperature"]
+        assert len(state.buffer) == 20 and not state.frozen
+
+    def test_zero_count_bins_are_not_frozen(self):
+        engine = make_engine()
+        feed(engine, [0.0] * 30, metric="pc10_0", step=300)
+        assert "Frozen Sensor Detected" not in alert_types(engine)
+
+    def test_can_be_disabled(self):
+        engine = make_engine(freeze_detection=False)
+        feed(engine, [21.3] * 30, metric="temperature", step=300)
+        assert "Frozen Sensor Detected" not in alert_types(engine)
+        assert len(engine._states[SENSOR]["temperature"].buffer) == 30
 
 
 class TestCooldown:

@@ -4,6 +4,9 @@
 #  Layered per-reading detection, fastest to slowest:
 #
 #    1. Hard bounds        : physically impossible values (instant)
+#       Frozen value       : the same reading repeated for >= 1 h is a stuck
+#                            sensor; frozen readings never enter history and
+#                            tracking restarts when the value moves again
 #    2. Robust z-score     : per-reading outliers via a median/MAD modified
 #                            z-score — robust to the very outliers it hunts,
 #                            unlike a mean/std z-score (masking/swamping)
@@ -25,7 +28,17 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from safe.config import DEFAULT_Z_THRESHOLD, HARD_BOUNDS
+from safe.config import (
+    DEFAULT_FREEZE_TOLERANCE,
+    DEFAULT_ROBUST_SCALE_FLOOR,
+    DEFAULT_Z_THRESHOLD,
+    FREEZE_EXEMPT_ZERO,
+    FREEZE_MIN_READINGS,
+    FREEZE_MIN_SECONDS,
+    FREEZE_TOLERANCES,
+    HARD_BOUNDS,
+    ROBUST_SCALE_FLOORS,
+)
 from safe.stats import sample_comparison, validate_alpha
 
 logger = logging.getLogger(__name__)
@@ -111,6 +124,11 @@ class _MetricState:
     baseline_scale: float = 1.0           # robust sigma estimate (1.4826 * MAD)
     baseline_ready: bool = False
     since_refresh: int = 0                # accepted readings since baseline refresh
+    scale_floor: float = DEFAULT_ROBUST_SCALE_FLOOR
+    freeze_value: float = None            # value of the current repeated-value run
+    freeze_count: int = 0                 # readings in that run
+    freeze_start: float = 0.0             # timestamp of the run's first reading
+    frozen: bool = False                  # run confirmed as a freeze
 
     def mean_std(self):
         n = len(self.buffer)
@@ -131,10 +149,11 @@ class _MetricState:
         q75, q25 = np.percentile(arr, [75.0, 25.0])
         iqr_sigma = float(q75 - q25) / 1.349
         scale = max(mad_sigma, iqr_sigma)
-        if scale < 1e-3:
-            # Flat baseline: fall back to the classic std, floored so the
-            # z-score is always defined.
-            scale = max(float(arr.std()), 1e-3)
+        if scale < self.scale_floor:
+            # Flat baseline: fall back to the classic std, floored at the
+            # metric's resolution so a one-step move off a flat stretch is not
+            # scored as an enormous z.
+            scale = max(float(arr.std()), self.scale_floor)
         self.baseline_median = med
         self.baseline_scale = scale
         self.baseline_ready = True
@@ -143,6 +162,15 @@ class _MetricState:
     def rebuild_accumulators(self):
         self.run_sum = float(sum(self.buffer))
         self.run_sumsq = float(sum(v * v for v in self.buffer))
+
+    def restart(self):
+        """Drop all history so tracking warms up afresh."""
+        self.buffer.clear()
+        self.outliers.clear()
+        self.eval_count = 0
+        self.rebuild_accumulators()
+        self.baseline_ready = False
+        self.ph.reset()
 
 
 class SensorDrift:
@@ -163,11 +191,15 @@ class SensorDrift:
                   faults. Enable it for stationary streams (e.g. shuntVoltage)
                   or short high-rate windows where the baseline is stable.
     autocorr_correction : use effective sample sizes in the windowed tests
+    freeze_detection : flag a metric that repeats one value for
+                  FREEZE_MIN_READINGS readings spanning FREEZE_MIN_SECONDS as a
+                  frozen sensor, and keep its frozen readings out of history
     """
 
     def __init__(self, window_size=200, z_threshold=DEFAULT_Z_THRESHOLD,
                  p_alpha=0.01, cooldown_seconds=1800, on_alert=None,
-                 enable_page_hinkley=False, autocorr_correction=True):
+                 enable_page_hinkley=False, autocorr_correction=True,
+                 freeze_detection=True):
         if isinstance(window_size, bool) or not isinstance(window_size, (int, np.integer)) or window_size < MIN_HISTORY:
             raise ValueError(f"window_size must be an integer >= {MIN_HISTORY}")
         validate_alpha(p_alpha)
@@ -184,6 +216,7 @@ class SensorDrift:
         self.on_alert = on_alert or default_alert_handler
         self.enable_page_hinkley = enable_page_hinkley
         self.autocorr_correction = autocorr_correction
+        self.freeze_detection = freeze_detection
 
         self.hard_bounds = HARD_BOUNDS.copy()
         self.alerts = []                  # (sensor, alert_dict, data_time) history
@@ -221,6 +254,7 @@ class SensorDrift:
                 buffer=deque(maxlen=self.window_size),
                 outliers=deque(maxlen=STEP_CHANGE_RUN),
                 ph=PageHinkley(),
+                scale_floor=ROBUST_SCALE_FLOORS.get(metric, DEFAULT_ROBUST_SCALE_FLOOR),
             )
             sensor_states[metric] = state
         return state
@@ -284,6 +318,10 @@ class SensorDrift:
 
         state = self._state_for(sensor_name, metric)
         buffer = state.buffer
+
+        if self.freeze_detection and self._track_freeze(sensor_name, metric, state, value,
+                                                        current_timestamp, data_time_str):
+            return  # a frozen reading is not data
 
         if len(buffer) >= MIN_HISTORY:
             if not state.baseline_ready or state.since_refresh >= BASELINE_REFRESH_EVERY:
@@ -354,6 +392,53 @@ class SensorDrift:
             # Reset to half the window so evaluations overlap (samples 101-200
             # get compared against 201-300 — no blind spots between windows).
             state.eval_count = self.window_size // 2
+
+    def _track_freeze(self, sensor_name, metric, state, value,
+                      current_timestamp, data_time_str):
+        """Track repeated-value runs; return True while the metric is frozen.
+
+        When a confirmed freeze ends, history is dropped: the buffer holds
+        pre-freeze readings that may be hours stale, so the first live reading
+        would otherwise be misread as an outlier or step change.
+        """
+        tolerance = FREEZE_TOLERANCES.get(metric, DEFAULT_FREEZE_TOLERANCE)
+        if state.freeze_value is not None and abs(value - state.freeze_value) <= tolerance:
+            state.freeze_count += 1
+        else:
+            if state.frozen:
+                if self._alert_cooldown(sensor_name, metric, "freeze-recovered", current_timestamp):
+                    self._emit(sensor_name, {
+                        "alert": "Frozen Sensor Recovered",
+                        "metric": metric,
+                        "frozen_value": round(state.freeze_value, 3),
+                        "frozen_readings": state.freeze_count,
+                        "frozen_seconds": round(current_timestamp - state.freeze_start),
+                        "value": round(value, 3),
+                    }, data_time_str)
+                state.restart()
+            state.freeze_value = value
+            state.freeze_count = 1
+            state.freeze_start = current_timestamp
+            state.frozen = False
+            return False
+
+        if state.frozen:
+            return True
+        if value == 0.0 and metric in FREEZE_EXEMPT_ZERO:
+            return False
+        if (state.freeze_count >= FREEZE_MIN_READINGS
+                and current_timestamp - state.freeze_start >= FREEZE_MIN_SECONDS):
+            state.frozen = True
+            if self._alert_cooldown(sensor_name, metric, "freeze", current_timestamp):
+                self._emit(sensor_name, {
+                    "alert": "Frozen Sensor Detected",
+                    "metric": metric,
+                    "value": round(value, 3),
+                    "repeated_readings": state.freeze_count,
+                    "frozen_seconds": round(current_timestamp - state.freeze_start),
+                }, data_time_str)
+            return True
+        return False
 
     def _handle_step_change(self, sensor_name, metric, state, value,
                             current_timestamp, data_time_str):

@@ -70,6 +70,8 @@ class _HealthState:
         self.peer_offset = None
         self.window_category = None
         self.window_evidence = {}
+        self.reference_drift_confirmations = 0
+        self.reference_drift_evidence = None
 
     def to_dict(self):
         output = {}
@@ -434,6 +436,8 @@ class SensorHealth:
             state.residuals.clear()
             state.ph.reset()
             state.run_count = 0
+            state.reference_drift_confirmations = 0
+            state.reference_drift_evidence = None
         if peer is not None:
             expected = peer + state.peer_offset
         residual = value - expected
@@ -494,10 +498,15 @@ class SensorHealth:
         if state.last_evaluation is None or t - state.last_evaluation >= p.evaluation_interval_seconds:
             state.last_evaluation = t
             self._window_test(sensor, metric, state, t, seen, environmental)
+            self._reference_drift_test(state)
         if state.window_category is not None:
             seen.add("change")
             self._observe(sensor, metric, state.window_category, "change", t,
                           "info" if environmental else "warning", 0.7, **state.window_evidence)
+        if state.reference_drift_evidence is not None:
+            seen.add("change")
+            self._observe(sensor, metric, "gradual_degradation", "change", t, "warning", 0.8,
+                          **state.reference_drift_evidence)
         if not anomalous and not ({"freeze", "plausibility"} & seen) and not p.stationary_residuals:
             before = state.baseline.revision
             state.baseline.learn(t, value)
@@ -533,6 +542,33 @@ class SensorHealth:
         evidence = {k: v for k, v in result.items() if isinstance(v, (int, float, bool)) and math.isfinite(v)}
         state.window_category = category
         state.window_evidence = dict(alpha_spent_this_test=alpha, evaluation_number=state.evaluations, **evidence)
+
+    def _reference_drift_test(self, state):
+        """Calibration drift: sustained disagreement with a reference.
+
+        Residuals against a reference cancel shared weather, so a persistent
+        nonzero median is attributable to this sensor. The median over the
+        window is robust to reference glitches; the tolerance is a practical
+        calibration limit, not a significance level.
+        """
+        p = state.profile
+        values = [v for _, v in state.residuals]
+        if not state.peer_mode or len(values) < max(8, p.minimum_samples // 2):
+            state.reference_drift_confirmations = 0
+            state.reference_drift_evidence = None
+            return
+        median = float(np.median(values))
+        if abs(median) < p.reference_drift_tolerance:
+            state.reference_drift_confirmations = 0
+            state.reference_drift_evidence = None
+            return
+        state.reference_drift_confirmations += 1
+        if state.reference_drift_confirmations >= p.persistence_evaluations:
+            state.reference_drift_evidence = dict(
+                evidence_source="reference", median_reference_residual=median,
+                reference_offset=state.peer_offset, window_readings=len(values),
+                tolerance=p.reference_drift_tolerance,
+                interpretation="sustained disagreement with reference; calibration drift suspected")
 
     def snapshot(self):
         payload = {"schema_version": STATE_SCHEMA_VERSION, "engine_version": ENGINE_VERSION,

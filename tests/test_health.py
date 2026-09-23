@@ -202,6 +202,58 @@ def test_peer_consensus_separates_shared_episode_and_isolated_offset():
     assert len(notices) == 1 and notices[0]["category"] == "abrupt_shift"
 
 
+def _feed_with_reference(engine, sensor_values, reference_values, start=0, dt=60):
+    for index, (value, reference) in enumerate(zip(sensor_values, reference_values)):
+        t = start + index * dt
+        engine.data_processing("s", {"unix_timestamp": t, "temperature": value},
+                               references={"temperature": [{"sensor": "ref", "timestamp": t,
+                                                              "value": reference, "trusted": True}]})
+
+
+def test_reference_drift_below_step_threshold_is_flagged():
+    notices = []
+    engine = engine_for(on_notification=notices.append)
+    rng = np.random.default_rng(5)
+    warm(engine)
+    reference = 20 + rng.normal(0, .1, 600)
+    # Offset learned while healthy, then a 1.5 C ramp: under the 2 C step
+    # threshold, so only the reference-drift check can see it.
+    drift = np.concatenate([np.zeros(100), np.linspace(0, 1.5, 500)])
+    _feed_with_reference(engine, reference + 0.3 + drift + rng.normal(0, .1, 600), reference,
+                         start=120 * 60)
+    assert [n["category"] for n in notices] == ["gradual_degradation"]
+    evidence = notices[0]["evidence"]["gradual_degradation"]
+    assert evidence["evidence_source"] == "reference"
+    assert abs(evidence["median_reference_residual"]) >= 0.5
+    assert abs(evidence["reference_offset"] - 0.3) < 0.1
+
+
+def test_sensor_tracking_reference_through_trend_is_not_drift():
+    notices = []
+    engine = engine_for(on_notification=notices.append)
+    rng = np.random.default_rng(6)
+    warm(engine)
+    # A genuine 10 C ambient trend: a single sensor could not tell this from
+    # drift, but agreement with the reference clears it.
+    reference = 20 + np.concatenate([np.zeros(100), np.linspace(0, 10, 500)]) + rng.normal(0, .1, 600)
+    _feed_with_reference(engine, reference + 0.3 + rng.normal(0, .1, 600), reference, start=120 * 60)
+    assert notices == []
+    assert engine._states[("s", "temperature")].reference_drift_evidence is None
+
+
+def test_reference_drift_state_survives_snapshot_and_old_snapshots_load():
+    engine = engine_for()
+    warm(engine)
+    snapshot = engine.snapshot()
+    restored = SensorHealth.from_snapshot(snapshot)
+    assert restored._states[("s", "temperature")].reference_drift_confirmations == 0
+    for item in snapshot["states"]:
+        del item["state"]["reference_drift_confirmations"]
+        del item["state"]["reference_drift_evidence"]
+    legacy = SensorHealth.from_snapshot(snapshot)
+    assert legacy._states[("s", "temperature")].reference_drift_evidence is None
+
+
 def test_stale_duplicate_self_and_future_peers_are_excluded():
     engine = engine_for()
     p = short_profile()

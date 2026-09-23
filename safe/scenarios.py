@@ -12,6 +12,7 @@ class Reading:
     values: dict[str, float]
     restart: bool = False  # discard all engine state immediately before this input
     expected_rejection: bool = False  # specifically an out-of-order ValueError
+    references: dict | None = None  # metric -> co-located peer readings (SensorHealth only)
 
 
 @dataclass(frozen=True)
@@ -39,10 +40,13 @@ class Scenario:
 
 
 def synthetic_scenarios(seed: int = 1729) -> list[Scenario]:
-    """Sixteen 7-day, 5-minute fixtures (including a startup-freeze control).
+    """Eighteen 7-day, 5-minute fixtures (including a startup-freeze control).
 
     Temperature is Celsius; PM is ug/m3. Each fixture gets an independent fixed
     child seed. Slow movement is a short seasonal-like segment, not a full year.
+    The two *_with_reference fixtures pair a drift with a healthy trend of the
+    same slope, each seen alongside two co-located peers: only a reference can
+    tell them apart.
     """
     names = (
         "healthy_iid", "healthy_ar1", "healthy_diurnal", "healthy_slow_movement",
@@ -50,6 +54,7 @@ def synthetic_scenarios(seed: int = 1729) -> list[Scenario]:
         "abrupt_offset", "calibration_drift", "frozen_sensor", "missing_data",
         "increased_noise", "decreased_sensitivity", "out_of_order",
         "restart_during_fault", "startup_freeze",
+        "calibration_drift_with_reference", "healthy_slow_movement_with_reference",
     )
     start, dt, n = 1735689600.0, 300.0, 2016
     times = start + np.arange(n) * dt
@@ -61,6 +66,7 @@ def synthetic_scenarios(seed: int = 1729) -> list[Scenario]:
         values = 20 + noise
         metric, sensor = "temperature", "synthetic-001"
         labels, omit, restarts, rejected = [], set(), set(), set()
+        peers = None
         onset = 720
 
         def fault(category, first=onset, stop=n):
@@ -115,9 +121,25 @@ def synthetic_scenarios(seed: int = 1729) -> list[Scenario]:
         elif name == "startup_freeze":
             values[:] = 20
             fault("freeze", 0)
+        elif name.endswith("_with_reference"):
+            ambient = 20 + 8 * np.sin(2 * np.pi * np.arange(n) / 288)
+            if name == "healthy_slow_movement_with_reference":
+                ambient += np.linspace(0, 12, n)
+            values = ambient + noise
+            if name == "calibration_drift_with_reference":
+                values[onset:] += np.linspace(0, 8, n - onset)
+                fault("calibration_drift")
+            peers = ambient + rng.normal(0, 0.3, (2, n))
+
+        def references(i):
+            if peers is None:
+                return None
+            return {metric: [{"sensor": f"reference-{k}", "value": float(peers[k, i]),
+                              "timestamp": float(times[i])} for k in range(len(peers))]}
+
         readings = tuple(
             Reading(float(times[i - 2] if i in rejected else times[i]), sensor,
-                    {metric: float(values[i])}, i in restarts, i in rejected)
+                    {metric: float(values[i])}, i in restarts, i in rejected, references(i))
             for i in range(n) if i not in omit
         )
         result.append(Scenario(

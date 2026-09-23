@@ -18,6 +18,10 @@ class MetricProfile:
     residual_scale_floor: float = 0.3
     step_min_effect: float = 2
     step_readings: int = 8
+    # Sustained disagreement with a reference beyond this calibration tolerance
+    # is reported as drift. Only evaluated when a reference is supplied: a single
+    # sensor cannot separate slow drift from a genuine ambient trend.
+    reference_drift_tolerance: float = 0.5
     freeze_tolerance: float = 0.001
     freeze_duration_seconds: float = 3600
     freeze_min_readings: int = 12
@@ -89,17 +93,18 @@ def metric_profile(metric, deployment="outdoor", expected_interval_seconds=300):
                    if isinstance(expected_interval_seconds, (int, float)) and expected_interval_seconds > 0 else 4096)
     if metric == "humidity":
         options.update(residual_scale_floor=1, step_min_effect=5, freeze_tolerance=0.01,
-                       seasonal_rate_per_day=5)
+                       seasonal_rate_per_day=5, reference_drift_tolerance=3)
     elif metric == "pressure":
         options.update(residual_scale_floor=0.5, step_min_effect=3,
-                       seasonal_rate_per_day=5)
+                       seasonal_rate_per_day=5, reference_drift_tolerance=1)
     elif metric in PM_METRICS or metric.startswith("pc"):
         options.update(residual_scale_floor=1, step_min_effect=5,
                        freeze_at_startup=False, freeze_tolerance=0,
-                       seasonal_rate_per_day=10)
+                       seasonal_rate_per_day=10, reference_drift_tolerance=2)
     elif metric == "shuntVoltage":
         options.update(residual_scale_floor=0.001, step_min_effect=0.005,
-                       freeze_tolerance=0.000001, seasonal_rate_per_day=0.001)
+                       freeze_tolerance=0.000001, seasonal_rate_per_day=0.001,
+                       reference_drift_tolerance=0.002)
     elif metric != "temperature":
         options.update(freeze_at_startup=False)
     if deployment == "laboratory":

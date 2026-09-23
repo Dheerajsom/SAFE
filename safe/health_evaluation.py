@@ -56,7 +56,8 @@ def replay_health(scenario, configuration=None):
         if reading.restart:
             engine = SensorHealth.from_snapshot(engine.snapshot(), on_event=collect,
                                                 on_notification=notifications.append)
-        engine.data_processing(reading.sensor, {**reading.values, "unix_timestamp": reading.timestamp})
+        engine.data_processing(reading.sensor, {**reading.values, "unix_timestamp": reading.timestamp},
+                               references=reading.references)
     while clock < scenario.end:
         engine.tick(clock)
         clock += interval
@@ -181,6 +182,7 @@ def acceptance(report):
             return False
         return group["actionable_detected" if actionable else "detected"] / group["expected"]
 
+    rows = {r["name"]: r for r in report["by_scenario"]}
     delays = [r["median_actionable_delay_readings"] for r in report["by_scenario"]
               if any(f["category"] == "level_offset" for f in r["faults"])
               and r["median_actionable_delay_readings"] is not None]
@@ -190,6 +192,10 @@ def acceptance(report):
             "abrupt_actionable_recall_at_least_90_percent": recall("level_offset", True) >= .9,
             "false_actionable_incidents_below_0_1_per_sensor_day": report["overall"]["false_actionable_incidents_per_sensor_day"] < .1,
             "abrupt_median_delay_at_most_15_readings": bool(delays) and float(np.median(delays)) <= 15,
+            "reference_calibration_drift_detected":
+                rows.get("calibration_drift_with_reference", {}).get("actionable_recall") == 1,
+            "no_reference_drift_on_healthy_trend":
+                rows.get("healthy_slow_movement_with_reference", {}).get("false_actionable_incidents") == 0,
             "one_notification_per_incident": all(r["max_notifications_per_incident"] <= 1 for r in report["by_scenario"]),
             "no_page_hinkley_notifications_on_diurnal_data": all(
                 not any(v.get("stationary_residuals") for v in e["evidence"].values())

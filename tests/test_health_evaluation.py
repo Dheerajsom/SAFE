@@ -22,10 +22,17 @@ def test_operating_targets_on_calibration(health_report):
         assert row["detected_faults"] + row["missed_faults"] == row["expected_faults"]
         assert row["max_notifications_per_incident"] <= 1
     rows = {r["name"]: r for r in health_report["by_scenario"]}
-    for name in ("healthy_iid", "healthy_ar1", "healthy_diurnal", "healthy_slow_movement", "legitimate_pm_episode"):
+    for name in ("healthy_iid", "healthy_ar1", "healthy_diurnal", "healthy_slow_movement",
+                 "legitimate_pm_episode", "healthy_slow_movement_with_reference"):
         assert rows[name]["false_actionable_incidents"] == 0
     # Keep the known ambiguity visible instead of broadening attribution to pass.
     assert rows["calibration_drift"]["missed_faults"] == 1
+    # A reference resolves it: the drift is attributed to the reference-drift check.
+    drift = rows["calibration_drift_with_reference"]
+    assert drift["actionable_recall"] == 1
+    assert drift["median_actionable_detection_delay_seconds"] <= 24 * 3600
+    evidence = [e["evidence"].get("gradual_degradation", {}) for e in drift["events"]]
+    assert any(ev.get("evidence_source") == "reference" for ev in evidence)
     assert rows["abrupt_offset"]["notifications"] == 1
     assert rows["startup_freeze"]["actionable_recall"] == 1
     assert rows["missing_data"]["actionable_recall"] == 1

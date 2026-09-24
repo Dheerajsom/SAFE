@@ -20,7 +20,7 @@ from safe.profiles import MetricProfile, ProfileRegistry, SensorRules
 from safe.stats import sample_comparison
 
 STATE_SCHEMA_VERSION = 1
-ENGINE_VERSION = "2.0.0"
+ENGINE_VERSION = "3.0.0"
 
 
 def utc_seconds(value):
@@ -80,6 +80,21 @@ class PageHinkley:
         return None
 
 
+def _peer_sample(p, value, peer):
+    """One reading's target/reference relationship: a difference, or a log ratio."""
+    c = p.reference_ratio_floor
+    if not c:
+        return value - peer
+    # Clamp so a value below -floor (only possible without hard bounds) stays finite.
+    return math.log(max(value + c, 1e-3 * c) / max(peer + c, 1e-3 * c))
+
+
+def _peer_expected(p, peer, offset):
+    """Target value predicted from the reference and the learned relationship."""
+    c = p.reference_ratio_floor
+    return (peer + c) * math.exp(offset) - c if c else peer + offset
+
+
 class _HealthState:
     def __init__(self, profile):
         self.profile = profile
@@ -87,6 +102,7 @@ class _HealthState:
         self.ph = PageHinkley()
         self.warmup = deque(maxlen=profile.max_samples)
         self.residuals = deque(maxlen=profile.max_samples)
+        self.reference_levels = deque(maxlen=profile.max_samples)  # (t, reference-predicted value)
         self.recent_anomalies = deque(maxlen=profile.max_samples)
         self.peer_samples = deque(maxlen=profile.max_samples)
         self.arrivals = deque(maxlen=profile.max_samples)
@@ -142,7 +158,8 @@ class _HealthState:
             elif key == "ph":
                 obj.ph = PageHinkley(value["delta"], value["lam"])
                 vars(obj.ph).update(value)
-            elif key in {"warmup", "residuals", "arrivals", "recent_anomalies", "peer_samples"}:
+            elif key in {"warmup", "residuals", "reference_levels", "arrivals", "recent_anomalies",
+                         "peer_samples"}:
                 if len(value) > obj.profile.max_samples:
                     raise ValueError("state history exceeds configured bound")
                 setattr(obj, key, deque(value, maxlen=obj.profile.max_samples))
@@ -358,6 +375,7 @@ class SensorHealth:
             state.freeze_started = None
             state.run_count = 0
             state.residuals.clear()
+            state.reference_levels.clear()
             state.recent_anomalies.clear()
             state.window_category = None
             state.ph.reset()
@@ -417,7 +435,7 @@ class SensorHealth:
         peer = self._peer(sensor, p, t, references)
         if not state.baseline.ready:
             if peer is not None and not ({"freeze", "plausibility"} & seen):
-                state.peer_samples.append(value - peer)
+                state.peer_samples.append(_peer_sample(p, value, peer))
             self._warmup(sensor, metric, state, value, t, seen)
         else:
             self._detect(sensor, metric, state, value, t, peer, seen)
@@ -472,18 +490,19 @@ class SensorHealth:
                 state.peer_offset = float(np.median(state.peer_samples))
                 state.peer_samples.clear()
             elif abs(value - expected) < p.step_min_effect:
-                state.peer_samples.append(value - peer)
+                state.peer_samples.append(_peer_sample(p, value, peer))
             if state.peer_offset is None:
                 peer = None  # no peer diagnosis until target/reference offset is learned
         if (peer is not None) != state.peer_mode:
             state.peer_mode = peer is not None
             state.residuals.clear()
+            state.reference_levels.clear()
             state.ph.reset()
             state.run_count = 0
             state.reference_drift_confirmations = 0
             state.reference_drift_evidence = None
         if peer is not None:
-            expected = peer + state.peer_offset
+            expected = _peer_expected(p, peer, state.peer_offset)
         residual = value - expected
         z = residual / scale
         anomalous = abs(z) >= p.outlier_threshold and abs(residual) >= p.step_min_effect
@@ -539,6 +558,10 @@ class SensorHealth:
         state.residuals.append((t, residual))
         while state.residuals and t - state.residuals[0][0] > p.window_seconds:
             state.residuals.popleft()
+        if peer is not None:
+            state.reference_levels.append((t, expected))
+            while t - state.reference_levels[0][0] > p.window_seconds:
+                state.reference_levels.popleft()
         if state.last_evaluation is None or t - state.last_evaluation >= p.evaluation_interval_seconds:
             state.last_evaluation = t
             self._window_test(sensor, metric, state, t, seen, environmental)
@@ -602,7 +625,9 @@ class SensorHealth:
             state.reference_drift_evidence = None
             return
         median = float(np.median(values))
-        if abs(median) < p.reference_drift_tolerance:
+        level = float(np.median([v for _, v in state.reference_levels])) if state.reference_levels else 0.0
+        tolerance = max(p.reference_drift_tolerance, p.reference_drift_relative_tolerance * abs(level))
+        if abs(median) < tolerance:
             state.reference_drift_confirmations = 0
             state.reference_drift_evidence = None
             return
@@ -610,8 +635,10 @@ class SensorHealth:
         if state.reference_drift_confirmations >= p.persistence_evaluations:
             state.reference_drift_evidence = dict(
                 evidence_source="reference", median_reference_residual=median,
-                reference_offset=state.peer_offset, window_readings=len(values),
-                tolerance=p.reference_drift_tolerance,
+                reference_offset=state.peer_offset,
+                reference_model="ratio" if p.reference_ratio_floor else "difference",
+                window_readings=len(values),
+                tolerance=tolerance, reference_level=level,
                 interpretation="sustained disagreement with reference; calibration drift suspected")
 
     def snapshot(self):

@@ -22,6 +22,17 @@ class MetricProfile:
     # is reported as drift. Only evaluated when a reference is supplied: a single
     # sensor cannot separate slow drift from a genuine ambient trend.
     reference_drift_tolerance: float = 0.5
+    # 0 compares against a reference by a learned constant difference. A positive
+    # value compares by a learned ratio of (value + floor) / (reference + floor),
+    # for metrics whose co-located sensors differ by gain (PM): a fixed-percentage
+    # difference then stays constant as concentrations rise. The floor keeps the
+    # ratio stable near zero, where the comparison becomes nearly additive.
+    reference_ratio_floor: float = 0
+    # Drift must also exceed this fraction of the typical reference-predicted
+    # level, like an accuracy spec of "± tolerance or ± percent, whichever is
+    # larger": co-located PM sensors wander a few percent for hours, which is
+    # several µg/m³ during pollution episodes. 0 keeps the absolute limit only.
+    reference_drift_relative_tolerance: float = 0
     freeze_tolerance: float = 0.001
     freeze_duration_seconds: float = 3600
     freeze_min_readings: int = 12
@@ -47,7 +58,8 @@ class MetricProfile:
                          "recovery_readings", "seasonal_bins", "seasonal_cycles",
                          "persistence_evaluations", "max_samples"}
         boolean_names = {"freeze_at_startup", "enable_page_hinkley", "stationary_residuals"}
-        nonnegative = {"freeze_tolerance", "seasonal_rate_per_day"}
+        nonnegative = {"freeze_tolerance", "seasonal_rate_per_day", "reference_ratio_floor",
+                       "reference_drift_relative_tolerance"}
         for f in fields(self):
             value = getattr(self, f.name)
             if f.name == "hard_bounds":
@@ -100,7 +112,8 @@ def metric_profile(metric, deployment="outdoor", expected_interval_seconds=300):
     elif metric in PM_METRICS or metric.startswith("pc"):
         options.update(residual_scale_floor=1, step_min_effect=5,
                        freeze_at_startup=False, freeze_tolerance=0,
-                       seasonal_rate_per_day=10, reference_drift_tolerance=2)
+                       seasonal_rate_per_day=10, reference_drift_tolerance=2,
+                       reference_ratio_floor=1, reference_drift_relative_tolerance=0.15)
     elif metric == "shuntVoltage":
         options.update(residual_scale_floor=0.001, step_min_effect=0.005,
                        freeze_tolerance=0.000001, seasonal_rate_per_day=0.001,

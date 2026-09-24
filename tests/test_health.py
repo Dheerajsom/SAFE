@@ -264,6 +264,44 @@ def test_sensor_tracking_reference_through_trend_is_not_drift():
     assert engine._states[("s", "temperature")].reference_drift_evidence is None
 
 
+def _pm_gain_run(sensor_gain, **changes):
+    """A PM sensor reading `sensor_gain` x a trusted reference through a 6x episode."""
+    profile = replace(short_profile(), hard_bounds=(0.0, 10000.0), residual_scale_floor=1,
+                      step_min_effect=5, freeze_at_startup=False, freeze_tolerance=0,
+                      reference_drift_tolerance=2, **{**dict(
+                          reference_ratio_floor=metric_profile("pm2_5").reference_ratio_floor,
+                          reference_drift_relative_tolerance=metric_profile(
+                              "pm2_5").reference_drift_relative_tolerance), **changes})
+    notices = []
+    engine = SensorHealth(profiles=ProfileRegistry(overrides=[dict(match={"metric": "pm2_5"},
+                                                                    profile=profile.to_dict())]),
+                          on_notification=notices.append)
+    rng = np.random.default_rng(11)
+    reference = 10 * np.concatenate([np.ones(200), np.linspace(1, 6, 200), 6 * np.ones(200)])
+    reference = reference * (1 + rng.normal(0, .02, reference.size))
+    gain = np.concatenate([np.full(200, 1.06), np.asarray(sensor_gain, dtype=float) * np.ones(400)])
+    for index, (ref, g) in enumerate(zip(reference, gain)):
+        t = index * 60
+        engine.data_processing("s", {"unix_timestamp": t, "pm2_5": ref * g},
+                               references={"pm2_5": [{"sensor": "ref", "timestamp": t,
+                                                      "value": ref, "trusted": True}]})
+    return [n["category"] for n in notices]
+
+
+def test_pm_gain_difference_is_not_drift_during_an_episode():
+    # A healthy sensor 6% above its co-located reference stays 6% above it at 6x
+    # concentration; a learned constant difference would call that growing gap drift.
+    assert _pm_gain_run(1.06, reference_ratio_floor=0, reference_drift_relative_tolerance=0) \
+        == ["gradual_degradation"]
+    assert _pm_gain_run(1.06) == []
+
+
+def test_pm_gain_drift_against_reference_is_still_flagged():
+    # At 6x concentration a gain drifting to 1.7 grows fast enough to read as a shift.
+    categories = _pm_gain_run(np.linspace(1.06, 1.7, 400))
+    assert categories and set(categories) <= {"gradual_degradation", "abrupt_shift"}
+
+
 def test_reference_drift_state_survives_snapshot_and_old_snapshots_load():
     engine = engine_for()
     warm(engine)

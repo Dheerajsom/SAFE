@@ -23,7 +23,7 @@ class HealthEvent:
     last_seen_at: float
     status: str = "open"
     evidence: dict = field(default_factory=dict)
-    engine_version: str = "2.0.0"
+    engine_version: str = "3.0.0"
     configuration: dict = field(default_factory=dict)
     family: str = "change"
     detection_count: int = 0

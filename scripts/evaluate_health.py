@@ -1,4 +1,4 @@
-"""Run the legacy/health comparison on fixed, separate synthetic splits."""
+"""Evaluate SensorHealth on fixed, separate synthetic splits."""
 
 import argparse
 import json

@@ -2,16 +2,13 @@
 #  SAFE — shared configuration
 #  --------------------------------------------------------------------------
 #  Physical limits, practical-significance gates, and display names shared by
-#  the streaming engine (safe.engine) and the period analysis (safe.periods).
+#  the health engine (safe.health, safe.profiles) and the period analysis (safe.periods).
 # ***************************************************************************
 
 # Cleaner display names for known measurements
 SENSOR_DISPLAY_NAMES = {
     'IPS7100MHC001': 'IPS7100_MHC_001',
 }
-
-# Iglewicz-Hoaglin cutoff for the modified (median/MAD) z-score
-DEFAULT_Z_THRESHOLD = 3.5
 
 # IPS7100 particulate-matter size bins (all µg/m³, cumulative by size)
 PM_BOUNDS = (0.0, 10000.0)
@@ -63,38 +60,6 @@ FLAT_MEAN_SHIFT_THRESHOLDS = {
     **{pc: 10.0 for pc in PC_METRICS},  # particles/L
 }
 DEFAULT_FLAT_MEAN_SHIFT = 0.01
-
-# --------------------------------------------------------------------------
-# Streaming engine: robust-scale floor and frozen-value detection
-# --------------------------------------------------------------------------
-# Floor on the robust sigma used by the modified z-score, roughly the
-# instrument's resolution. Without it a flat (held or quantized) buffer drives
-# the scale to ~0, so the first ordinary reading after a flat stretch scores a
-# huge z and a run of them is misreported as a step change.
-ROBUST_SCALE_FLOORS = {
-    'temperature':  0.1,     # °C
-    'humidity':     0.5,     # %RH
-    'pressure':     0.1,     # hPa
-    'shuntVoltage': 0.0005,  # V
-    **{pm: 0.1 for pm in PM_METRICS},   # µg/m³
-    **{pc: 1.0 for pc in PC_METRICS},   # particles/L
-}
-DEFAULT_ROBUST_SCALE_FLOOR = 1e-3
-
-# A metric repeating the same value (within tolerance) for at least this many
-# readings AND this long is frozen: a stuck or forward-filled sensor.
-FREEZE_MIN_READINGS = 12
-FREEZE_MIN_SECONDS = 3600
-FREEZE_TOLERANCES = {
-    'temperature':  0.001,
-    'humidity':     0.01,
-    'pressure':     0.001,
-    'shuntVoltage': 1e-6,
-}
-DEFAULT_FREEZE_TOLERANCE = 0.0
-# Large-particle count bins legitimately read exactly zero for hours in clean
-# air, so a run of zeros there is not treated as a freeze.
-FREEZE_EXEMPT_ZERO = frozenset(PC_METRICS)
 
 # Variance below this is considered flat (a constant signal)
 FLAT_VAR_THRESHOLD = 1e-12

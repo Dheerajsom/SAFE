@@ -1,4 +1,4 @@
-"""Incident-based sensor health engine. SensorDrift remains the legacy baseline."""
+"""Incident-based sensor health engine: SAFE's single streaming detector."""
 
 from collections import deque
 from dataclasses import asdict
@@ -14,8 +14,7 @@ import numpy as np
 import pandas as pd
 
 from safe.baseline import SeasonalBaseline, robust_scale
-from safe.config import PM_METRICS
-from safe.engine import PageHinkley
+from safe.config import PC_METRICS, PM_METRICS
 from safe.incidents import IncidentManager
 from safe.profiles import MetricProfile, ProfileRegistry, SensorRules
 from safe.stats import sample_comparison
@@ -35,6 +34,50 @@ def utc_seconds(value):
     if not math.isfinite(result):
         raise ValueError("timestamp must be finite and valid")
     return result
+
+
+class PageHinkley:
+    """Two-sided Page-Hinkley test on standardized residuals.
+
+    Accumulates m_t = sum(r_i - delta) and alarms when m_t rises more than
+    `lam` above its running minimum (and symmetrically for downward shifts).
+    With delta = 0.25 and lam = 18, a sustained 1-sigma mean shift alarms
+    after ~24 samples; pure noise drifts downward and almost never alarms.
+    """
+
+    def __init__(self, delta=0.25, lam=18.0):
+        if not np.isfinite(delta) or delta < 0 or not np.isfinite(lam) or lam <= 0:
+            raise ValueError("delta must be finite and nonnegative; lam must be finite and positive")
+        self.delta = delta
+        self.lam = lam
+        self.reset()
+
+    def reset(self):
+        self._m_up = 0.0
+        self._min_up = 0.0
+        self._m_down = 0.0
+        self._min_down = 0.0
+        self.samples = 0
+
+    def update(self, residual):
+        """Feed one standardized residual; return 'up' / 'down' on alarm, else None."""
+        if not np.isfinite(residual):
+            raise ValueError("residual must be finite")
+        self.samples += 1
+
+        self._m_up += residual - self.delta
+        self._min_up = min(self._min_up, self._m_up)
+
+        self._m_down += -residual - self.delta
+        self._min_down = min(self._min_down, self._m_down)
+
+        if self._m_up - self._min_up > self.lam:
+            self.reset()
+            return "up"
+        if self._m_down - self._min_down > self.lam:
+            self.reset()
+            return "down"
+        return None
 
 
 class _HealthState:
@@ -364,7 +407,8 @@ class SensorHealth:
             state.freeze_count += 1
         if (state.freeze_count >= p.freeze_min_readings and t - state.freeze_started >= p.freeze_duration_seconds
                 and (p.freeze_at_startup or state.has_variability)
-                and not (metric in PM_METRICS and value <= p.freeze_tolerance)):
+                # Clean air legitimately holds PM and particle-count bins at zero for hours.
+                and not ((metric in PM_METRICS or metric in PC_METRICS) and value <= p.freeze_tolerance)):
             seen.add("freeze")
             self._observe(sensor, metric, "sensor_freeze", "freeze", t, confidence=0.95,
                           run_length=state.freeze_count, duration_seconds=t - state.freeze_started,

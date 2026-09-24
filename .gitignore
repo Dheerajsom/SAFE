@@ -2,6 +2,8 @@
 mintsXU4/data/valo_node_01_1s/
 mintsXU4/data/valo_node_01_wimda_1s/
 *.gz
+# ...except the small seeded synthetic PM dataset used for testing
+!mintsXU4/data/synthetic_pm/*.csv.gz
 *.csv.part
 
 # Rendered media outputs

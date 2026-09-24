@@ -10,7 +10,7 @@ from safe.scenarios import Fault, Reading, Scenario
 LABEL_CATEGORIES = {"freeze": "freeze", "offline": "missing_data", "offset": "level_offset",
                     "spike": "spike", "invalid": "physical_bounds", "drift": "calibration_drift",
                     "noise": "noise_increase", "sensitivity": "sensitivity_loss",
-                    "clock": "timestamp_order"}
+                    "clock": "timestamp_order", "ordering": "bin_ordering", "restart": "restart"}
 CONTEXT_LABELS = {"healthy", "pollution_event", "maintenance", "unknown"}
 ANNOTATION_COLUMNS = ("sensor", "metric", "start", "end", "label", "confidence", "notes")
 

@@ -1,7 +1,8 @@
 # ***************************************************************************
 #  SAFE — command-line interface
 #
-#    safe stream  <csv>            replay a CSV through the streaming engine
+#    safe health  <csv>            replay CSVs into correlated health incidents
+#                                  (`safe stream` is an alias)
 #    safe periods <csv> -o <dir>   period-over-period analysis + plots
 # ***************************************************************************
 
@@ -12,33 +13,6 @@ import os
 import sys
 import json
 from pathlib import Path
-
-from safe.config import DEFAULT_Z_THRESHOLD
-
-
-def _add_stream_parser(subparsers):
-    p = subparsers.add_parser(
-        "stream", help="Replay InfluxDB-export CSV(s) through the streaming drift engine")
-    p.add_argument("csv", nargs="+",
-                   help="One or more long-format CSV/CSV.GZ paths, or a directory of them "
-                        "(replayed in sorted order through a single continuous engine)")
-    p.add_argument("--metric", action="append", dest="metrics",
-                   help="Restrict processing to this metric (repeatable, e.g. "
-                        "--metric pm1_0). Default: all metrics present in the file(s)")
-    p.add_argument("--window", type=int, default=200,
-                   help="Evaluation window size (default: 200). 1s-resolution data is "
-                        "heavily autocorrelated (rho~0.98) — use a much larger window "
-                        "(e.g. 7200) for the windowed Welch/Levene drift test to fire")
-    p.add_argument("--z-threshold", type=float, default=DEFAULT_Z_THRESHOLD,
-                   help="Modified z-score outlier cutoff (default: %(default)s)")
-    p.add_argument("--alpha", type=float, default=0.01,
-                   help="Significance level for the drift tests (default: 0.01)")
-    p.add_argument("--page-hinkley", action="store_true",
-                   help="Enable the Page-Hinkley sequential mean-shift layer "
-                        "(best for stationary streams; on ambient data it alarms "
-                        "on genuine diurnal weather shifts)")
-    p.add_argument("--no-autocorr", action="store_true",
-                   help="Disable the autocorrelation (n_eff) correction of test p-values")
 
 
 def _expand_csv_args(paths):
@@ -72,11 +46,17 @@ def main(argv=None):
         prog="safe",
         description="SAFE - Sensor Analysis and Failure Evaluation for MINTS air-quality nodes")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    _add_stream_parser(subparsers)
     _add_periods_parser(subparsers)
-    health = subparsers.add_parser("health", help="Replay CSVs into correlated health incidents")
-    health.add_argument("csv", nargs="+")
-    health.add_argument("--metric", action="append", dest="metrics")
+    health = subparsers.add_parser("health", aliases=["stream"],
+                                   help="Replay CSVs into correlated health incidents")
+    health.add_argument("csv", nargs="+",
+                        help="One or more long-format CSV/CSV.GZ paths, or a directory of them "
+                             "(replayed in sorted order through a single continuous engine)")
+    health.add_argument("--metric", action="append", dest="metrics",
+                        help="Restrict processing to this metric (repeatable)")
+    health.add_argument("--merge", action="store_true",
+                        help="Inputs cover the same period (e.g. one export per PM bin); merge them "
+                             "into one stream so cross-metric rules see every field")
     health.add_argument("--config", type=Path, help="JSON profiles, model rules, and sensor metadata")
     health.add_argument("--state-in", type=Path, help="Resume a compatible saved health state")
     health.add_argument("--state-out", type=Path, help="Atomically save state after successful replay")
@@ -97,10 +77,9 @@ def main(argv=None):
 
 
 def _run(args):
-    if args.command == "health":
-        import pandas as pd
-        from safe.health import SensorHealth
-        from safe.loader import load_pivoted_dataframe
+    if args.command in ("health", "stream"):
+        from safe.health import ENGINE_VERSION, SensorHealth
+        from safe.loader import replay_csv, replay_csvs
 
         if args.config and args.state_in:
             raise ValueError("saved state already contains configuration; omit --config when resuming")
@@ -137,55 +116,21 @@ def _run(args):
             callbacks = dict(on_event=on_event, on_notification=on_notification)
             engine = (SensorHealth.load_state(args.state_in, **callbacks) if args.state_in else
                       SensorHealth(**configuration, **callbacks))
-            previous_end = engine._clock
-            for filename in files:
-                frame, metrics = load_pivoted_dataframe(filename)
-                if frame is None:
-                    return 1
-                if args.metrics:
-                    metrics = [m for m in metrics if m in args.metrics]
-                if not metrics:
-                    raise ValueError("no requested metrics found")
-                first = float(frame['_unix_time'].min())
-                if previous_end is not None and first <= previous_end:
-                    raise ValueError("health replay files must be chronological and non-overlapping with saved state")
-                for sensor, timestamp, *values in frame[['_sensor_name', '_unix_time'] + metrics].itertuples(index=False, name=None):
-                    # Pivot NaNs represent absent fields; raw invalids are reported by loader warnings.
-                    record = {m: v for m, v in zip(metrics, values) if not pd.isna(v)}
-                    engine.data_processing(sensor, {**record, "unix_timestamp": timestamp})
-                previous_end = float(frame['_unix_time'].max())
+            replayed = (replay_csv(files, engine=engine, metrics=args.metrics) if args.merge else
+                        replay_csvs(files, engine=engine, metrics=args.metrics))
+            if replayed is None:
+                return 1
             if args.tick_until:
                 engine.tick(args.tick_until)
             if args.state_out:
                 engine.save_state(args.state_out)
-            summary = {"engine_version": "2.0.0", "configuration": engine.configuration(),
+            summary = {"engine_version": ENGINE_VERSION, "configuration": engine.configuration(),
                        "total_incidents": engine.incidents.total_opened,
                        "total_notifications": engine.incidents.total_notifications,
                        "active_incidents": len(engine.incidents.active),
                        "retained_incidents": engine.events}
             (args.output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         print(f"{engine.incidents.total_opened} incident(s); {engine.incidents.total_notifications} notification(s). {args.output}")
-        return 0
-
-    if args.command == "stream":
-        from safe.engine import SensorDrift
-        from safe.loader import replay_csvs
-
-        files = _expand_csv_args(args.csv)
-        if files is None:
-            return 1
-
-        engine = SensorDrift(
-            window_size=args.window,
-            z_threshold=args.z_threshold,
-            p_alpha=args.alpha,
-            enable_page_hinkley=args.page_hinkley,
-            autocorr_correction=not args.no_autocorr,
-        )
-        result = replay_csvs(files, engine=engine, metrics=args.metrics)
-        if result is None:
-            return 1
-        print(f"\n{len(engine.alerts)} alert(s) raised across {len(files)} file(s).")
         return 0
 
     if args.command == "periods":

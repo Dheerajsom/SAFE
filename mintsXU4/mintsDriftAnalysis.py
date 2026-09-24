@@ -1,9 +1,9 @@
 # ***************************************************************************
 #  Compatibility shim — the SAFE engine now lives in the `safe` package at the
-#  repository root (safe.engine / safe.stats / safe.loader / safe.config).
+#  repository root (safe.health / safe.stats / safe.loader / safe.config).
 #  This module re-exports the old public names so existing scripts keep
 #  working, and `python mintsXU4/mintsDriftAnalysis.py` still replays the
-#  bundled valo CSV through the engine.
+#  bundled valo CSV through the SensorHealth engine.
 # ***************************************************************************
 
 import logging
@@ -23,7 +23,7 @@ from safe.config import (            # noqa: F401,E402
     MIN_STD_RATIO,
     SENSOR_DISPLAY_NAMES,
 )
-from safe.engine import PageHinkley, SensorDrift, default_alert_handler  # noqa: F401,E402
+from safe.health import PageHinkley, SensorHealth  # noqa: F401,E402
 from safe.loader import load_pivoted_dataframe, parse_and_process_valo_data, replay_csv  # noqa: F401,E402
 from safe.stats import sample_comparison  # noqa: F401,E402
 
@@ -39,4 +39,8 @@ if __name__ == "__main__":
     logger.info(f"Current Working Directory: {os.getcwd()}")
     logger.info(f"Resolved Data File Path: {data_file}")
 
-    sys.exit(0 if replay_csv(data_file) is not None else 1)
+    engine = replay_csv(data_file)
+    if engine is None:
+        sys.exit(1)
+    logger.info(f"{engine.incidents.total_opened} incident(s); "
+                f"{engine.incidents.total_notifications} notification(s).")

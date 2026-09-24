@@ -6,11 +6,15 @@ Guidance for coding agents working in this repository.
 
 SAFE, Sensor Analysis and Failure Evaluation, is a Python analysis project for
 MINTS low-cost air-quality sensor data. It detects outliers, drift,
-distribution changes, and period-over-period changes.
+distribution changes, and period-over-period changes. `SensorHealth` is the
+single streaming engine (SAFE 3 removed the per-reading `SensorDrift` engine).
 
 The core lives in the `safe` package at the repo root; `mintsXU4/` holds thin
-compatibility shims plus older live-sensor utilities. Bundled source data
-lives at `mintsXU4/data/valo_node_01_full_year.csv`. Generated outputs live
+compatibility shims plus older live-sensor utilities. Engine accuracy is tested
+on the seeded synthetic PM dataset in `mintsXU4/data/synthetic_pm/` (one CSV per
+PM bin plus fault labels; see `docs/synthetic-pm.md`). The full-year field export
+`mintsXU4/data/valo_node_01_full_year.csv` is no longer tracked (removed in
+`40f2c4d`); the entry points below still default to it. Generated outputs live
 under `mintsXU4/output/`.
 
 ## Setup
@@ -28,8 +32,12 @@ extra adds the legacy live-node packages (`pyserial`, `paho-mqtt`, `pyyaml`, ...
 
 ```bash
 python -m pytest tests/                 # test suite — run this first
-safe stream mintsXU4/data/valo_node_01_full_year.csv
+safe health mintsXU4/data/valo_node_01_full_year.csv --config docs/health-config.json --state-out mintsXU4/output/health/state.json
+safe stream mintsXU4/data/valo_node_01_full_year.csv   # alias of `safe health`
 safe periods mintsXU4/data/valo_node_01_full_year.csv -o mintsXU4/output
+python scripts/evaluate_health.py --require-targets   # CI gate; exit 2 if a holdout target fails
+python scripts/generate_synthetic_pm.py --check      # synthetic PM dataset matches its generator
+python scripts/evaluate_synthetic_pm.py              # engine accuracy on the synthetic PM faults
 python mintsXU4/mintsDriftAnalysis.py   # legacy entry points still work
 python mintsXU4/mintsPeriodAnalysis.py
 python dataVisualizer.py
@@ -40,17 +48,35 @@ python dataVisualizer.py
 - `safe/stats.py`: Source of truth for `sample_comparison()` — Welch/Levene
   drift tests with effect-size gates and AR(1) effective-sample-size (n_eff)
   correction.
-- `safe/engine.py`: `SensorDrift` streaming engine — hard bounds, frozen-value
-  detection, robust (median/MAD+IQR, per-metric scale floor) modified z-score,
-  step-change detection, optional
-  Page-Hinkley layer, windowed drift evaluation. `PageHinkley` is off by
-  default because ambient diurnal cycles trigger it daily.
-- `safe/config.py`: `HARD_BOUNDS`, effect-size gates, flat-step thresholds,
-  robust-scale floors, freeze thresholds.
+- `safe/config.py`: `HARD_BOUNDS`, PM/PC metric lists, effect-size gates,
+  flat-step thresholds.
 - `safe/loader.py`: InfluxDB-export CSV loading (`load_pivoted_dataframe`) and
-  streaming replay (`replay_csv`).
+  streaming replay into `SensorHealth` (`replay_csv`, `replay_csvs`); pivot NaNs
+  are absent fields and are never fed to the engine.
 - `safe/periods.py` + `safe/plotting.py`: period-over-period comparisons and
   their plots.
+- `safe/health.py`: `SensorHealth` incident-based engine (`safe health`) —
+  hard bounds, timestamp checks, warmup, freeze/silence via `tick()`,
+  plausibility, residual outliers and step runs, windowed tests, peer/reference
+  calibration drift, restart-safe `save_state`/`load_state`. Also holds
+  `PageHinkley`, which profiles may enable only with `stationary_residuals=True`
+  because ambient diurnal cycles would trigger it daily. Changing detection
+  behavior shifts `scripts/evaluate_health.py` results; saved states check
+  `ENGINE_VERSION`.
+- `safe/profiles.py`: validated, serializable per-metric health profiles
+  (durations in elapsed UTC seconds); see `docs/health-config.json`.
+- `safe/baseline.py`: bounded robust UTC time-of-day profile; predict before
+  learning each reading.
+- `safe/incidents.py`: incident correlation and notification policy,
+  independent of the statistical detectors.
+- `safe/scenarios.py`, `safe/annotations.py`, `safe/health_evaluation.py`:
+  synthetic fault fixtures, operator labels and splits (labels never feed
+  detectors), and incident scoring with acceptance targets. See
+  `docs/health.md` and `docs/evaluation.md`.
+- `safe/synthetic_pm.py`: seeded generator and accuracy evaluation for the
+  synthetic PM dataset. Regenerate the committed files with
+  `scripts/generate_synthetic_pm.py` after any change, and bump
+  `GENERATOR_REVISION`; a test fails if they drift from the generator.
 - `mintsXU4/mintsDriftAnalysis.py`, `mintsXU4/mintsPeriodAnalysis.py`,
   `mintsXU4/mintsPeriodPlotter.py`: compatibility shims re-exporting from
   `safe`; keep them in sync when renaming public symbols.
@@ -85,6 +111,11 @@ files. Important areas:
 
 - Period CSVs/plots: `mintsXU4/output/period_*.csv`, `mintsXU4/output/plots/`
 - Distribution visualizer outputs: `mintsXU4/output/<field>/`
+- Health outputs: `mintsXU4/output/health/` (`events.jsonl` and
+  `notifications.jsonl` append on reuse — use a fresh directory for an
+  independent replay)
+- Health evaluation reports: `evaluation_output/health/`,
+  `evaluation_output/synthetic_pm/`
 
 ## Coding Guidelines
 
@@ -106,7 +137,7 @@ Before handing off substantial changes:
 4. Check `git status --short` and call out generated files that changed.
 
 Run the full suite before changes as well as after them. For substantial
-analysis changes, run all five offline workflows listed under Common Commands.
+analysis changes, run all offline workflows listed under Common Commands.
 Check CSV schemas, finite probabilities/counts, PNG readability, and nonzero
 failure exit codes. For animation changes, run a short headless preview; full
 year video generation requires optional local archives and substantial memory.

@@ -90,7 +90,19 @@ class TestReplayCsv:
 
         engine = replay_csv(csv)
         assert engine is not None
-        assert "hard-bounds-violation" in [a["alert"] for _, a, _ in engine.alerts]
+        assert "invalid_measurement" in [e["category"] for e in engine.events]
+
+    def test_absent_fields_are_not_measurements(self, tmp_path):
+        # Pivot NaNs for fields missing at a timestamp must not become invalid readings.
+        rows = [("2026-01-01T00:00:00Z", 10.0, "pm1_0", "M", "d"),
+                ("2026-01-01T00:05:00Z", 21.5, "temperature", "M", "d")]
+        engine = replay_csv(write_influx_csv(tmp_path / "sparse.csv", rows))
+        assert engine is not None
+        assert not any(e["category"] == "invalid_measurement" for e in engine.events)
+
+    def test_overlapping_replay_is_rejected(self, sample_csv):
+        engine = replay_csv(sample_csv)
+        assert replay_csv(sample_csv, engine=engine) is None
 
     def test_replay_missing_file_returns_none(self):
         assert replay_csv("does/not/exist.csv") is None

@@ -1,4 +1,7 @@
-"""Incident-unit scoring for SensorHealth, alongside the preserved v1 baseline."""
+"""Incident-unit scoring and reproducible reports for SensorHealth.
+
+See docs/evaluation.md for scoring units and the limitations of attribution.
+"""
 
 from dataclasses import asdict
 import json
@@ -7,7 +10,6 @@ import platform
 
 import numpy as np
 
-from safe.evaluation import evaluate, validate_scenario
 from safe.health import SensorHealth, ENGINE_VERSION
 from safe.scenarios import synthetic_scenarios
 
@@ -24,7 +26,36 @@ HEALTH_CATEGORIES = {
     "cadence_degradation": {"missing_data"},
     "timestamp_disorder": {"timestamp_order"},
     "duplicate_timestamp": {"timestamp_order"},
+    # Without peers a persistent PM change is informational: compatible, not actionable.
+    "uncertain_change": {"level_offset", "calibration_drift", "noise_increase", "sensitivity_loss"},
+    # A size-bin ordering violation shows a bin is wrong without identifying why.
+    "pm_ordering": {"bin_ordering", "level_offset", "calibration_drift", "sensitivity_loss",
+                    "freeze", "noise_increase", "spike", "physical_bounds"},
+    "possible_restart": {"restart"},
 }
+
+
+def validate_scenario(scenario):
+    if not np.isfinite([scenario.start, scenario.end]).all() or scenario.end <= scenario.start:
+        raise ValueError("scenario must have a finite positive observation interval")
+    identities = set(scenario.identities)
+    if not identities or len(identities) != len(scenario.identities):
+        raise ValueError("identities must be nonempty and unique")
+    if any(not sensor or not metric for sensor, metric in identities):
+        raise ValueError("sensor and metric identities must be nonempty")
+    if len({f.id for f in scenario.faults}) != len(scenario.faults):
+        raise ValueError("fault IDs must be unique within a scenario")
+    for fault in scenario.faults:
+        if ((fault.sensor, fault.metric) not in identities
+                or not scenario.start <= fault.start < fault.end <= scenario.end):
+            raise ValueError("fault identity or interval is outside scenario")
+    for reading in scenario.readings:
+        if not scenario.start <= reading.timestamp < scenario.end:
+            raise ValueError("reading timestamp outside scenario")
+        if not reading.values or any((reading.sensor, m) not in identities for m in reading.values):
+            raise ValueError("reading identity outside scenario")
+        if not np.isfinite(list(reading.values.values())).all():
+            raise ValueError("readings must be finite; represent gaps by absent readings")
 
 
 def replay_health(scenario, configuration=None):
@@ -214,16 +245,14 @@ def write_comparison(output, seeds=(1729, 2718, 31415), configuration=None):
     root.mkdir(parents=True, exist_ok=True)
     report = {"splits": {}, "tuning_policy": "fixed configuration; no automated fitting to evaluation labels"}
     lines = ["# SAFE health evaluation", "", "Synthetic evidence only; field validation pending.", "",
-             "Legacy FP counts raw alerts; health FP counts actionable incidents. These are different units.", "",
-             "| Split | Legacy alerts | Legacy unmatched alerts | Health incidents | False actionable incidents | Detected faults | Notifications |",
-             "|---|---:|---:|---:|---:|---:|---:|"]
+             "False positives count actionable incidents, not individual readings.", "",
+             "| Split | Incidents | False actionable incidents | Detected faults | Notifications |",
+             "|---|---:|---:|---:|---:|"]
     for split, seed in zip(("calibration", "development", "holdout"), seeds):
-        scenarios = synthetic_scenarios(seed)
-        baseline = evaluate(scenarios, seed=seed)
-        health = evaluate_health(scenarios, configuration)
-        report["splits"][split] = dict(seed=seed, baseline=baseline, health=health, acceptance=acceptance(health))
-        b, h = baseline["overall"], health["overall"]
-        lines.append(f"| {split} ({seed}) | {b['reading_level_alerts']} | {b['false_positive_alerts']} | "
+        health = evaluate_health(synthetic_scenarios(seed), configuration)
+        report["splits"][split] = dict(seed=seed, health=health, acceptance=acceptance(health))
+        h = health["overall"]
+        lines.append(f"| {split} ({seed}) | "
                      f"{sum(r['incidents'] for r in health['by_scenario'])} | {h['false_actionable_incidents']} | "
                      f"{h['detected_faults']}/{h['expected_faults']} | {h['notifications']} |")
     lines += ["", "Holdout targets:", ""]

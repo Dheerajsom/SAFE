@@ -64,21 +64,21 @@ python mintsInfluxDownloader.py --window 1s --gzip --start auto
 | `--merge` | also stitch everything into one merged CSV |
 | `--backend cli` | shell out to the `influx` CLI instead of raw HTTP |
 
-## 3. Live terminal alerts — `safe stream`
+## 3. Sensor-health incidents — `safe health`
 
-Replay 1-second PM data through the streaming drift engine, one metric at a
-time, across a directory of day-files, as a single continuous stream (state
-carries across day boundaries — buffers and baselines aren't reset at each
-file):
+Replay 1-second PM data through the health engine, one metric at a time,
+across a directory of day-files, as a single continuous stream (state carries
+across day boundaries — baselines and open incidents aren't reset at each
+file). `safe stream` is an alias of `safe health`.
 
 ```bash
-python -m safe.cli stream mintsXU4/data/valo_node_01_1s --metric pm1_0 --window 7200
+python -m safe.cli health mintsXU4/data/valo_node_01_1s --metric pm1_0 \
+    --config docs/health-config-1s.json -o mintsXU4/output/health_1s
 ```
 
-> `--window 7200` (2 hours of 1s data) matters, not just a knob: `window=200`
-> (the CLI default) is far too short at 1s resolution for the windowed
-> Welch/Levene drift test to ever fire — lag-1 autocorrelation is ~0.98, so a
-> 200-sample window has two 100-reading halves, each carrying only ~1 effective observation.
+> `--config docs/health-config-1s.json` matters, not just a knob: it sets the
+> profile cadence to 1 second. With the default 300-second profiles, gaps,
+> completeness, and window sizes are interpreted at the wrong rate.
 
 If `safe` isn't on `PATH` (e.g. Git Bash on some setups), use
 `python -m safe.cli` as above instead of the bare `safe` command.
@@ -88,35 +88,36 @@ If `safe` isn't on `PATH` (e.g. Git Bash on some setups), use
 ```powershell
 # PowerShell
 $files = (Get-ChildItem mintsXU4\data\valo_node_01_1s\*.csv.gz | Sort-Object Name | Select-Object -First 7).FullName
-python -m safe.cli stream $files --metric pm1_0 --window 7200
+python -m safe.cli health $files --metric pm1_0 --config docs/health-config-1s.json
 ```
 
 ```bash
 # bash
-python -m safe.cli stream $(ls mintsXU4/data/valo_node_01_1s/*.csv.gz | sort | head -7) --metric pm1_0 --window 7200
+python -m safe.cli health $(ls mintsXU4/data/valo_node_01_1s/*.csv.gz | sort | head -7) --metric pm1_0 --config docs/health-config-1s.json
 ```
 
 Swap `-First 7` / `head -7` for a later slice to shift the window, e.g.
-`-Skip 30 -First 7` for the 5th week of data.
+`-Skip 30 -First 7` for the 5th week of data. Use a fresh `-o` directory per
+independent replay: the JSONL files append.
 
 | Flag | Purpose |
 |---|---|
 | `--metric NAME` | repeatable; restrict to one or more metrics |
-| `--z-threshold N` | modified z-score outlier cutoff (default 3.5) |
-| `--alpha N` | significance level for Welch/Levene (default 0.01) |
-| `--page-hinkley` | opt-in sequential mean-shift layer (off by default — alarms daily on genuine diurnal weather shifts on ambient outdoor data) |
-| `--no-autocorr` | disable the n_eff autocorrelation correction |
+| `--config FILE` | JSON profiles, model rules, and sensor metadata |
+| `--state-in` / `--state-out` | resume from / save a restart-safe checkpoint |
+| `--tick-until ISO` | explicit observation end for silence detection |
+| `-o DIR` | output directory (default `mintsXU4/output/health`) |
 
-## 4. Daily alert-count summary over the whole 1s dataset
+## 4. Daily incident-count summary over the whole 1s dataset
 
-Loops a **fresh** engine per day-file (no cross-day state) and tabulates
-alert counts to a CSV — good for eyeballing trends across many days at once,
-not for live terminal alerts (use section 3 for that):
+Replays every day-file through **one continuous** engine (1-second cadence
+profiles by default) and tabulates the incidents opened per day to a CSV —
+good for eyeballing trends across many days at once:
 
 ```bash
 python scripts/summarize_daily_drift.py
-python scripts/summarize_daily_drift.py --variant default --variant no-autocorr --variant page-hinkley
 python scripts/summarize_daily_drift.py --limit 10 -o /tmp/drift.csv
+python scripts/summarize_daily_drift.py --config docs/health-config-1s.json
 ```
 
 Default output: `mintsXU4/output/drift_day_summary.csv`

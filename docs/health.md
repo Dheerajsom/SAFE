@@ -1,10 +1,10 @@
 # SAFE sensor health
 
-SAFE 2 adds `SensorHealth`: a sensor-health and data-quality engine that produces
-correlated incidents with evidence and recovery. `SensorDrift`, `safe stream`, the
-period-analysis functions, and legacy scripts preserve their previous behavior.
-Use `safe health` for the new workflow. No live serial, MQTT, downloader, or
-credential dependency is introduced.
+`SensorHealth` is SAFE's streaming engine: a sensor-health and data-quality
+engine that produces correlated incidents with evidence and recovery. It replaced
+the SAFE 2 per-reading `SensorDrift` alert engine in SAFE 3; `safe stream` is now an
+alias of `safe health`. No live serial, MQTT, downloader, or credential dependency
+is introduced.
 
 ## Analyze a deployment
 
@@ -107,8 +107,8 @@ State progresses through `WARMING_UP`, `MONITORING`, `SUSPECTED`, `INCIDENT`, an
 robust gate rejects gross startup contamination and repeated contamination restarts
 the provisional sample. Daily environmental modeling waits for sufficient phase
 coverage. An unknown stable offset present throughout startup cannot be identified
-without a reference. PM zeros are allowed; freeze rules do not call stable clean-air
-zero values a failure. Customize tolerances to the instrument's quantization.
+without a reference. PM and particle-count zeros are allowed; freeze rules do not
+call stable clean-air zero values a failure. Customize tolerances to the instrument's quantization.
 
 The expected signal is a robust UTC phase profile, interpolated between bins, with
 a rate-limited seasonal level. Each phase retains a bounded number of cycle
@@ -179,21 +179,19 @@ engine.data_processing("node-001", {
 ## Evaluation and field evidence
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/evaluate_engine.py
 .\.venv\Scripts\python.exe scripts/evaluate_health.py --require-targets
 .\.venv\Scripts\python.exe -m pytest tests/
 ```
 
-The first command preserves yesterday's baseline evaluation. The second compares
-the unchanged legacy detector and the new health engine on the same fixtures,
-using fixed calibration/development/holdout seeds. It writes strict JSON plus a
-Markdown table under ignored `evaluation_output/health/`. There is no automatic
-threshold tuning against labels. Fault attribution uses exact sensor/metric,
-compatible evidence categories, and evidence observed inside the fault interval.
-An incident can match one fault; repeated observations never create extra true
-positives. Reports distinguish diagnostic recall, actionable recall, actionable
-incident precision, false incidents per sensor-day, notification counts, and delays.
-Legacy raw-alert counts and new incident counts have different units.
+The first command evaluates the health engine on fixed calibration, development,
+and holdout seeds. It writes strict JSON plus a Markdown table under ignored
+`evaluation_output/health/`. There is no automatic threshold tuning against labels.
+Fault attribution uses exact sensor/metric, compatible evidence categories, and
+evidence observed inside the fault interval. An incident can match one fault;
+repeated observations never create extra true positives. Reports distinguish
+diagnostic recall, actionable recall, actionable incident precision, false
+incidents per sensor-day, notification counts, and delays. See
+[evaluation.md](evaluation.md) for the attribution table and units.
 
 Use `docs/fault-labels-template.csv` for operator annotation. Supported labels are
 `healthy`, `pollution_event`, `maintenance`, `freeze`, `offline`, `offset`, `spike`,

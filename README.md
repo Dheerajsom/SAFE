@@ -1,18 +1,18 @@
 # SAFE — Sensor Analysis & Failure Evaluation
 
 SAFE analyzes MINTS low-cost air-quality sensor data for impossible readings,
-outliers, abrupt changes, and slower statistical drift. It is designed for two
-complementary workflows:
+outliers, abrupt changes, freezes, gaps, and slower statistical drift. It is
+designed for two complementary workflows:
 
-- **Streaming replay:** process each reading as it arrives and emit alerts.
+- **Streaming health:** `SensorHealth` processes each reading as it arrives and
+  maintains correlated sensor-health incidents with evidence, notifications,
+  recovery, and restart-safe state. See the [health guide](docs/health.md) and
+  [pilot results](docs/health-pilot.md).
 - **Period analysis:** compare calendar periods to produce CSV summaries and
   static plots for investigation and reporting.
 
-SAFE 2 also provides **sensor-health incidents** through `SensorHealth` and
-`safe health`: correlated evidence, freeze/silence detection, environmental
-residuals, profile configuration, and restart-safe state. See the
-[health guide](docs/health.md) and [pilot results](docs/health-pilot.md).
-The legacy streaming and period workflows below retain their behavior.
+SAFE 3 has a single streaming engine. The SAFE 2 per-reading `SensorDrift` alert
+engine was removed; `safe stream` is now an alias of `safe health`.
 
 The maintained implementation is the [`safe/`](safe/) package. The
 [`mintsXU4/`](mintsXU4/) directory retains compatibility entry points and older
@@ -26,9 +26,6 @@ pip install -e ".[dev]"
 # Analyze sensor health with incidents and save a restart checkpoint
 safe health mintsXU4/data/valo_node_01_full_year.csv --config docs/health-config.json --state-out mintsXU4/output/health/state.json
 
-# Replay the bundled InfluxDB export through the streaming engine
-safe stream mintsXU4/data/valo_node_01_full_year.csv
-
 # Compare adjacent days, weeks, months, and years; write CSVs and plots
 safe periods mintsXU4/data/valo_node_01_full_year.csv -o mintsXU4/output
 
@@ -38,7 +35,7 @@ python -m pytest tests/
 
 The bundled data is a two-year, five-minute export for Influx measurement
 `IPS7100MHC001` (device ID `001e064a1520`). SAFE displays it as
-`IPS7100_MHC_001` in output and alerts.
+`IPS7100_MHC_001` in output and incidents.
 
 ## How SAFE processes data
 
@@ -54,52 +51,42 @@ InfluxDB-style CSV (long rows)
         ▼
 safe.loader: validate, clean, pivot, normalize timestamps
         │
-        ├──► safe.engine: per-reading alerts and streaming state
+        ├──► safe.health: streaming health incidents and state
         │
         └──► safe.periods: calendar comparisons, CSVs, and plots
 ```
 
-Each sensor and metric gets its own streaming state: a sliding history buffer,
-a robust baseline, an outlier streak, an optional Page-Hinkley detector, and
-per-alert cooldowns. A bad PM reading therefore cannot alter the baseline for
-temperature, nor can an alert from one sensor suppress another sensor's alert.
+Each sensor and metric gets its own health state: a warm-up sample, a robust
+time-of-day baseline, residual runs, windowed tests, and freeze/availability
+tracking. A bad PM reading therefore cannot alter the baseline for temperature,
+and incidents are kept per sensor, metric, and symptom family.
 
-## Streaming SAFE engine
+## Streaming health engine
 
-`SensorDrift` applies the following layers from fastest to slowest. A reading
-that fails a hard-bound or outlier check is kept out of the normal history, so
-obvious failures do not contaminate future comparisons.
+`SensorHealth` checks, per reading, from fastest to slowest:
 
-| Layer | Detector | What it catches | Typical latency |
-|---:|---|---|---|
-| 1 | Hard physical bounds | Impossible values, such as negative PM or humidity over 100% | One reading |
-| 2 | Robust modified z-score | Isolated readings far from the median/MAD+IQR baseline | One reading |
-| 3 | Consecutive-outlier rule | Abrupt level changes that persist for 10 readings | About 10 readings |
-| 4 | Page-Hinkley (optional) | Sustained smaller mean shifts in a stable stream | Tens of readings |
-| 5 | Windowed Welch + Levene tests | Practical changes in mean or variance across a full window | One evaluation window |
+| Evidence | What it catches | Typical latency |
+|---|---|---|
+| Hard physical bounds | Impossible values, such as negative PM or humidity over 100% | One reading |
+| Timestamp checks | Duplicate, backward, delayed, or future readings | One reading |
+| Freeze detector | A value repeated (within tolerance) for an hour or more | About an hour |
+| Robust residual outlier | Readings far from the expected time-of-day baseline | One reading |
+| Persistent residual run | Abrupt level changes | About 8 readings |
+| Windowed Welch + Levene tests | Practical mean or variance changes across half-windows | Hours |
+| Reference drift (with peers) | Sustained disagreement with co-located references | Hours |
+| Clock ticks | Silence, gaps, cadence and completeness loss | Configurable |
 
-### What happens after a potential failure
-
-- **Hard-bound violation:** alerts immediately and is never stored in the
-  metric history.
-- **Single robust outlier:** alerts (subject to cooldown) and is not stored.
-- **Ten consecutive outliers:** alerts as a step change, then reseeds the
-  history at the new level so monitoring can recover instead of rejecting all
-  subsequent readings.
-- **Windowed drift:** compares the older and newer halves of the sliding
-  buffer. Evaluations overlap by half a window to avoid gaps between checks.
-- **Cooldowns:** alerts of the same sensor, metric, and type are spaced by 30
-  minutes by default; all alerts remain available in `engine.alerts`.
-
-Hard bounds are defined for the common MINTS metrics in
-[`safe/config.py`](safe/config.py). Unknown numeric metrics can still receive
-outlier and drift analysis, but do not have a metric-specific physical bound
-unless one is added there.
+Invalid, frozen, and anomalous readings never train the baseline. Related evidence
+is grouped into one incident that escalates, notifies at most once, and recovers
+after a quiet period. Hard bounds are defined for the common MINTS metrics in
+[`safe/config.py`](safe/config.py); per-metric scales, freeze tolerances, and
+windows live in [`safe/profiles.py`](safe/profiles.py). The
+[health guide](docs/health.md) covers profiles, references, and state files.
 
 ### Why a small p-value is not enough
 
 The shared `sample_comparison()` function in [`safe/stats.py`](safe/stats.py)
-is used by both the streaming and period-analysis paths. It prevents two common
+is used by both the health engine and period analysis. It prevents two common
 false-alarm patterns in environmental sensor data:
 
 - **Practical-effect gate:** a mean shift must be statistically significant
@@ -112,23 +99,20 @@ false-alarm patterns in environmental sensor data:
   meaningless variance tests; SAFE checks whether their levels moved by a
   metric-specific amount instead.
 
-The Page-Hinkley layer is off by default. Outdoor sensor streams often contain
-real daily environmental cycles, and enabling it for ambient data can produce
-alerts for weather rather than device faults. It is more useful for stable,
-high-rate signals such as `shuntVoltage`.
+The Page-Hinkley detector is off by default. Outdoor sensor streams contain real
+daily environmental cycles, so it may only be enabled on profiles that declare
+`stationary_residuals=True`.
 
 ## Command-line usage
 
 ```bash
 # Process one or more CSV/CSV.GZ exports, or a directory of exports.
-# One engine is kept alive across directory files, preserving history.
-safe stream mintsXU4/data/valo_node_01_full_year.csv
+# One engine is kept alive across files, preserving history.
+safe health mintsXU4/data/valo_node_01_full_year.csv -o mintsXU4/output/health
 
-# Restrict to one metric and choose a larger drift window.
-safe stream mintsXU4/data/valo_node_01_full_year.csv --metric pm1_0 --window 7200
-
-# Enable the sequential detector only for an appropriately stable signal.
-safe stream data.csv --metric shuntVoltage --page-hinkley
+# Restrict to one metric; resume from and update a saved state.
+safe health next-export.csv --metric pm1_0 \
+    --state-in mintsXU4/output/health/state.json --state-out mintsXU4/output/health/state.json
 
 # Create period_*.csv reports and PNG plots.
 safe periods mintsXU4/data/valo_node_01_full_year.csv -o mintsXU4/output
@@ -137,43 +121,36 @@ safe periods mintsXU4/data/valo_node_01_full_year.csv -o mintsXU4/output
 safe periods data.csv -o mintsXU4/output --no-plots
 ```
 
-For one-second PM data, use a substantially larger `--window` (the project
-examples use `7200`). At that sampling rate, a short 200-reading window often
-has fewer than three effective independent observations after autocorrelation
-correction, so the statistical window test intentionally remains conservative.
+For one-second data, set the profile cadence with `--config` (for example
+`{"profiles": {"expected_interval_seconds": 1}}`) so warm-up, gap, and window
+durations are interpreted at that rate.
 
 ### Python API
 
 ```python
-from safe import SensorDrift, replay_csv
+from safe import SensorHealth, replay_csv
 
-def publish_alert(sensor_name, alert, timestamp):
-    print(sensor_name, timestamp, alert)
-
-engine = SensorDrift(on_alert=publish_alert)
+engine = SensorHealth(on_notification=lambda event: print(event["category"], event["sensor"]))
 replay_csv("data.csv", engine=engine)
 
-for sensor_name, alert, timestamp in engine.alerts:
-    print(sensor_name, timestamp, alert["alert"])
+for event in engine.events:
+    print(event["sensor"], event["metric"], event["category"], event["status"])
 ```
 
-`on_alert` is a callback, so applications may replace the example function
-with their own logger, database writer, or MQTT publisher without changing
-SAFE's analysis code.
+`on_event` and `on_notification` are callbacks, so applications may plug in their
+own logger, database writer, or MQTT publisher without changing SAFE's analysis code.
 
 Inputs use ISO timestamps; naive timestamps are interpreted as UTC. Invalid
 timestamps, missing identifiers and nonfinite readings are discarded with a
 warning. Duplicate readings at the same UTC instant keep the first valid value.
 Other devices sharing the bundled measurement receive a device-ID suffix so
 their baselines remain separate. Replay files must be chronological and
-non-overlapping; out-of-order readings fail the replay. `replay_csv` returns
-`None` on load or processing failure, with partial state retained in a supplied
-engine. The CLI returns a nonzero exit code for these failures.
+non-overlapping with each other and any saved state. `replay_csv` returns `None`
+on load or processing failure, with partial state retained in a supplied engine.
+The CLI returns a nonzero exit code for these failures.
 
-`SensorDrift` requires an integer window of at least 30 readings, positive finite
-z threshold, significance level strictly between 0 and 1, and nonnegative finite
-cooldown. `sample_comparison` requires finite one-dimensional samples of at least
-two readings each. AR(1) correction and thinning are approximations; they do not
+`sample_comparison` requires finite one-dimensional samples of at least two
+readings each. AR(1) correction and thinning are approximations; they do not
 remove seasonal confounding or establish that a detected change is a sensor fault.
 
 ## Period analysis and outputs
@@ -254,11 +231,12 @@ See [`scripts.md`](scripts.md) for a fuller one-second-data workflow.
 
 ## Repository layout
 
-- [`safe/`](safe/) — maintained package: engine, statistics, loader, period
-  comparisons, plotting, and CLI.
-- [`tests/`](tests/) — tests for the engine, statistics, loader, and reports.
+- [`safe/`](safe/) — maintained package: health engine, statistics, loader,
+  period comparisons, plotting, evaluation, and CLI.
+- [`tests/`](tests/) — tests for the health engine, statistics, loader, and reports.
 - [`mintsXU4/`](mintsXU4/) — compatibility shims, legacy live-node tools, and
   high-resolution PM utilities.
-- [`mintsXU4/data/`](mintsXU4/data/) — bundled five-minute example export;
-  large one-second source files are intentionally ignored by Git.
+- [`mintsXU4/data/synthetic_pm/`](mintsXU4/data/synthetic_pm/) — seeded synthetic PM
+  test dataset with labeled faults ([guide](docs/synthetic-pm.md)); large
+  one-second source files are intentionally ignored by Git.
 - [`mintsXU4/output/`](mintsXU4/output/) — generated analysis artifacts.

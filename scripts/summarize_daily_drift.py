@@ -1,31 +1,30 @@
 # ***************************************************************************
-#  Loop the SAFE streaming engine over every day-file in a 1-second data
-#  directory and tabulate alert counts per day, so drift-detector behavior
-#  can be eyeballed across many days instead of one CLI run at a time.
+#  Replay every day-file in a 1-second data directory through ONE continuous
+#  SensorHealth engine and tabulate the incidents opened per day, so detector
+#  behavior can be eyeballed across many days instead of one CLI run at a time.
 #
 #    python scripts/summarize_daily_drift.py
-#    python scripts/summarize_daily_drift.py --variant default --variant no-autocorr
 #    python scripts/summarize_daily_drift.py --limit 10 -o /tmp/drift.csv
+#    python scripts/summarize_daily_drift.py --config docs/health-config.json
 # ***************************************************************************
 
 import argparse
 import collections
 import glob
+import json
 import logging
 import os
 import sys
 import time
+from pathlib import Path
 
 import pandas as pd
 
-from safe.engine import SensorDrift
+from safe.health import SensorHealth
 from safe.loader import replay_csv
 
-VARIANT_KWARGS = {
-    "default": dict(autocorr_correction=True, enable_page_hinkley=False),
-    "no-autocorr": dict(autocorr_correction=False, enable_page_hinkley=False),
-    "page-hinkley": dict(autocorr_correction=True, enable_page_hinkley=True),
-}
+# The day-files are 1-second data; profiles must know the cadence.
+DEFAULT_CONFIGURATION = {"profiles": {"expected_interval_seconds": 1}}
 
 
 def _day_label(file_path):
@@ -35,32 +34,24 @@ def _day_label(file_path):
     return parts[-2] if len(parts) >= 2 else name
 
 
-def summarize_file(file_path, variant):
-    engine = SensorDrift(on_alert=lambda *a, **k: None, **VARIANT_KWARGS[variant])
-    result = replay_csv(file_path, engine=engine)
-    if result is None:
-        return None
-    counts = collections.Counter(alert["alert"] for _, alert, _ in engine.alerts)
-    return counts
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", default="mintsXU4/data/valo_node_01_1s",
                         help="Directory of day-files (default: %(default)s)")
     parser.add_argument("--pattern", default="*.csv.gz",
                         help="Glob pattern for day-files (default: %(default)s)")
-    parser.add_argument("--variant", action="append", choices=list(VARIANT_KWARGS),
-                        help="Engine config to run (repeatable). Default: just 'default'.")
+    parser.add_argument("--config", type=Path,
+                        help="SensorHealth JSON configuration (default: 1-second cadence profiles)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only process the first N day-files (sorted by name)")
     parser.add_argument("-o", "--output", default="mintsXU4/output/drift_day_summary.csv",
-                        help="Where to write the per-day/variant CSV (default: %(default)s)")
+                        help="Where to write the per-day CSV (default: %(default)s)")
     args = parser.parse_args(argv)
 
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
-    variants = args.variant or ["default"]
+    configuration = (json.loads(args.config.read_text(encoding="utf-8")) if args.config
+                     else DEFAULT_CONFIGURATION)
 
     files = sorted(glob.glob(os.path.join(args.data_dir, args.pattern)))
     if args.limit:
@@ -69,24 +60,29 @@ def main(argv=None):
         print(f"No files matched {args.data_dir}/{args.pattern}", file=sys.stderr)
         return 1
 
+    counts = collections.Counter()
+
+    def on_event(action, event):
+        if action == "opened":
+            counts[event["category"]] += 1
+
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    engine = SensorHealth(**configuration, on_event=on_event)
     rows = []
-    failures = 0
+    failed = False
     for i, file_path in enumerate(files, 1):
         day = _day_label(file_path)
-        for variant in variants:
-            t0 = time.time()
-            counts = summarize_file(file_path, variant)
-            elapsed = time.time() - t0
-            if counts is None:
-                print(f"[{i}/{len(files)}] {day} ({variant}): FAILED to load")
-                failures += 1
-                continue
-            total = sum(counts.values())
-            print(f"[{i}/{len(files)}] {day} ({variant}): {total} alert(s) in {elapsed:.1f}s "
-                  f"({dict(counts)})")
-            row = {"day": day, "variant": variant, "total_alerts": total}
-            row.update(counts)
-            rows.append(row)
+        counts.clear()
+        t0 = time.time()
+        if replay_csv(file_path, engine=engine) is None:
+            # The engine may hold partial state; later days would not be comparable.
+            print(f"[{i}/{len(files)}] {day}: FAILED; stopping")
+            failed = True
+            break
+        total = sum(counts.values())
+        print(f"[{i}/{len(files)}] {day}: {total} incident(s) opened in {time.time() - t0:.1f}s "
+              f"({dict(counts)})")
+        rows.append({"day": day, "total_incidents": total, **counts})
 
     if not rows:
         return 1
@@ -96,11 +92,9 @@ def main(argv=None):
         os.makedirs(out_dir, exist_ok=True)
     df.to_csv(args.output, index=False)
     print(f"\nWrote {len(df)} row(s) to {args.output}")
+    print(df["total_incidents"].agg(["mean", "min", "max", "count"]))
 
-    print("\n=== Summary (mean alerts/day by variant) ===")
-    print(df.groupby("variant")["total_alerts"].agg(["mean", "min", "max", "count"]))
-
-    return 1 if failures else 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

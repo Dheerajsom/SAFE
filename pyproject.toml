@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mints-safe"
-version = "2.0.0"
+version = "3.0.0"
 description = "SAFE — Sensor Analysis and Failure Evaluation for MINTS low-cost air-quality sensor nodes"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from safe import MetricProfile, ProfileRegistry, SensorHealth, SensorRules
+from safe import MetricProfile, PageHinkley, ProfileRegistry, SensorHealth, SensorRules
 from safe.baseline import SeasonalBaseline
 from safe.incidents import IncidentManager
 from safe.profiles import metric_profile
@@ -83,6 +83,29 @@ def test_freeze_from_startup_quantization_and_legitimate_zero_pm():
     pm = SensorHealth()
     feed(pm, [0] * 400, metric="pm2_5", dt=300)
     assert not any(e["category"] == "sensor_freeze" for e in pm.events)
+
+
+def test_zero_particle_counts_are_not_frozen_but_stuck_counts_are():
+    # Large-particle count bins legitimately read exactly zero for hours in clean air.
+    clean = SensorHealth()
+    feed(clean, [3, 0, 5, 0] + [0] * 400, metric="pc5_0", dt=300)
+    assert not any(e["category"] == "sensor_freeze" for e in clean.events)
+    stuck = SensorHealth()
+    feed(stuck, [3, 0, 5, 0] + [7] * 400, metric="pc5_0", dt=300)
+    assert any(e["category"] == "sensor_freeze" for e in stuck.events)
+
+
+def test_page_hinkley_alarms_on_sustained_shift_in_either_direction():
+    rng = np.random.default_rng(0)
+    up = PageHinkley(delta=0.25, lam=18.0)
+    assert all(up.update(r) is None for r in rng.normal(0, 1, 500))
+    assert "up" in [up.update(r) for r in rng.normal(1.0, 1.0, 100)]
+    down = PageHinkley(delta=0.25, lam=18.0)
+    assert "down" in [down.update(r) for r in rng.normal(-1.0, 1.0, 100)]
+    with pytest.raises(ValueError):
+        PageHinkley(lam=0)
+    with pytest.raises(ValueError):
+        down.update(float("nan"))
 
 
 def test_freeze_run_is_anchored_not_a_chain_of_small_moves():

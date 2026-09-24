@@ -18,15 +18,11 @@ REQUIRED_COLUMNS = ['_time', '_value', '_field', '_measurement', 'device_id']
 _META_COLS = ['_time', '_measurement', 'device_id', '_unix_time', '_str_time', '_sensor_name']
 
 
-def load_pivoted_dataframe(file_path):
-    """Load an InfluxDB-style long CSV and pivot fields into metric columns.
-
-    Returns (pivot_df, metric_cols) or (None, None) on failure. The frame is
-    indexed by a tz-naive UTC DatetimeIndex named '_dt' so callers can resample.
-    """
+def _read_long_csv(file_path):
+    """Read one long-format export's required columns, or None on failure."""
     if not os.path.exists(file_path):
         logger.error(f"Data file not found: {file_path}")
-        return None, None
+        return None
 
     logger.info(f"Reading data from {file_path}...")
 
@@ -34,20 +30,38 @@ def load_pivoted_dataframe(file_path):
         header = pd.read_csv(file_path, comment='#', nrows=0)
     except (OSError, ValueError, pd.errors.ParserError) as exc:
         logger.error("Cannot read %s: %s", file_path, exc)
-        return None, None
+        return None
     missing = [col for col in REQUIRED_COLUMNS if col not in header.columns]
     if missing:
         logger.error(f"Missing expected columns: {missing}. Detected: {header.columns.tolist()}")
-        return None, None
+        return None
 
     try:
-        df = pd.read_csv(file_path, comment='#', usecols=REQUIRED_COLUMNS,
-                         dtype={'device_id': 'string', '_measurement': 'string', '_field': 'string'})
+        return pd.read_csv(file_path, comment='#', usecols=REQUIRED_COLUMNS,
+                           dtype={'device_id': 'string', '_measurement': 'string', '_field': 'string'})
     except (OSError, ValueError, pd.errors.ParserError) as exc:
         logger.error("Cannot read %s: %s", file_path, exc)
-        return None, None
+        return None
 
-    # Ensure numeric values are properly typed, then drop NaN in critical columns
+
+def load_pivoted_dataframe(file_path):
+    """Load an InfluxDB-style long CSV and pivot fields into metric columns.
+
+    `file_path` may also be a list of paths covering the same period (e.g. one
+    export per field); their rows are merged before deduplication and pivoting.
+
+    Returns (pivot_df, metric_cols) or (None, None) on failure. The frame is
+    indexed by a tz-naive UTC DatetimeIndex named '_dt' so callers can resample.
+    """
+    paths = [file_path] if isinstance(file_path, (str, os.PathLike)) else list(file_path)
+    if not paths:
+        logger.error("No data files given")
+        return None, None
+    frames = [_read_long_csv(path) for path in paths]
+    if any(frame is None for frame in frames):
+        return None, None
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
     df['_value'] = pd.to_numeric(df['_value'], errors='coerce')
     df['_time'] = pd.to_datetime(df['_time'], format='ISO8601', utc=True, errors='coerce')
     valid = df[REQUIRED_COLUMNS].notna().all(axis=1) & np.isfinite(df['_value'])
@@ -104,19 +118,21 @@ def load_pivoted_dataframe(file_path):
 
 
 def replay_csv(file_path, engine=None, metrics=None):
-    """Replay a CSV through a SensorDrift engine as if it were streaming.
+    """Replay a CSV through a SensorHealth engine as if it were streaming.
 
     `metrics`, if given, restricts processing to that subset of metric columns
     (e.g. ['pm1_0']) — other fields present in the file are ignored entirely.
+    Pivot NaNs are absent fields, not measurements, so they are never fed in.
+    The file must start after the engine's clock (chronological, non-overlapping).
 
-    Returns the engine (with its .alerts history) or None on load or row failure.
+    Returns the engine (with its incident history) or None on load or row failure.
     A supplied engine retains any successfully processed rows on failure.
     """
     # Imported here so loading data never requires the engine's dependencies
-    from safe.engine import SensorDrift
+    from safe.health import SensorHealth
 
     if engine is None:
-        engine = SensorDrift()
+        engine = SensorHealth()
 
     pivot_df, metric_cols = load_pivoted_dataframe(file_path)
     if pivot_df is None:
@@ -131,17 +147,22 @@ def replay_csv(file_path, engine=None, metrics=None):
             logger.error(f"None of the requested metrics {metrics} are present in {file_path}")
             return None
 
-    records = pivot_df[['_sensor_name', '_unix_time', '_str_time'] + metric_cols].itertuples(index=False, name=None)
+    clock = getattr(engine, "_clock", None)
+    if clock is not None and float(pivot_df['_unix_time'].min()) <= clock:
+        logger.error(f"{file_path} overlaps data already replayed; files must be chronological "
+                     "and non-overlapping with each other and any saved state")
+        return None
+
+    records = pivot_df[['_sensor_name', '_unix_time'] + metric_cols].itertuples(index=False, name=None)
     logger.info("Processing %d data points...", len(pivot_df))
 
     # Limit per-row error reporting: show the first few in detail, then count
     MAX_ROW_ERROR_TRACES = 3
     error_count = 0
 
-    for sensor_name, timestamp, label, *values in records:
-        record = dict(zip(metric_cols, values))
+    for sensor_name, timestamp, *values in records:
+        record = {m: v for m, v in zip(metric_cols, values) if not pd.isna(v)}
         record['unix_timestamp'] = timestamp
-        record['str_timestamp'] = label
 
         try:
             engine.data_processing(sensor_name, record)
@@ -161,18 +182,18 @@ def replay_csv(file_path, engine=None, metrics=None):
 
 
 def replay_csvs(file_paths, engine=None, metrics=None):
-    """Replay several CSVs through ONE SensorDrift engine, in order.
+    """Replay several CSVs through ONE SensorHealth engine, in order.
 
     Files must be supplied in chronological, non-overlapping order.
-    State (buffers, baselines, cooldowns) carries across files, so a run over
-    consecutive day-files behaves like a single continuous stream instead of
-    resetting at each file boundary. Returns the engine, or None if any file
-    fails to load.
+    State (baselines, windows, open incidents) carries across files, so a run
+    over consecutive day-files behaves like a single continuous stream instead
+    of resetting at each file boundary. Returns the engine, or None if any
+    file fails.
     """
-    from safe.engine import SensorDrift
+    from safe.health import SensorHealth
 
     if engine is None:
-        engine = SensorDrift()
+        engine = SensorHealth()
 
     for i, file_path in enumerate(file_paths, 1):
         logger.info(f"[{i}/{len(file_paths)}] {file_path}")

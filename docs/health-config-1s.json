@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "deployment": "outdoor",
+    "expected_interval_seconds": 1
+  },
+  "sensors": {
+    "IPS7100_MHC_001": {
+      "model": "IPS7100",
+      "site": "valo_node_01"
+    }
+  },
+  "history_limit": 1000,
+  "max_series": 1000,
+  "notification_interval_seconds": 1800
+}

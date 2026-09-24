@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from safe.cli import main
-from safe.engine import SensorDrift
+from safe.health import SensorHealth
 from safe.loader import load_pivoted_dataframe, replay_csv
 from safe.periods import bucketize, run_period_analysis
 from safe.stats import sample_comparison
@@ -44,8 +44,8 @@ def test_known_measurement_devices_do_not_share_state(tmp_path):
         ("2026-01-01T00:00:00Z", 8, "x", "IPS7100MHC001", "second"),
     ])
     engine = replay_csv(csv)
-    assert list(engine._states["IPS7100_MHC_001"]["x"].buffer) == [1]
-    assert list(engine._states["IPS7100_MHC_001_second"]["x"].buffer) == [8]
+    assert engine._states[("IPS7100_MHC_001", "x")].last_value == 1
+    assert engine._states[("IPS7100_MHC_001_second", "x")].last_value == 8
 
 
 def test_partial_replay_reports_failure(sample_csv):
@@ -63,35 +63,11 @@ def sample_csv(tmp_path):
     ])
 
 
-@pytest.mark.parametrize("kwargs", [
-    {"window_size": 0}, {"window_size": 29}, {"window_size": 30.5},
-    {"p_alpha": 0}, {"p_alpha": float("nan")}, {"z_threshold": -1},
-    {"cooldown_seconds": -1}, {"on_alert": 3},
-])
-def test_engine_rejects_invalid_configuration(kwargs):
-    with pytest.raises(ValueError):
-        SensorDrift(**kwargs)
-
-
-def test_alternating_spikes_are_not_a_step():
-    engine = SensorDrift(on_alert=lambda *args: None, cooldown_seconds=0)
-    for i, value in enumerate([10.] * 40 + [1., 20.] * 10):
-        engine.data_processing("sensor", {"unix_timestamp": i, "pm1_0": value})
-    assert not any(a["alert"] == "Step-Change Detected" for _, a, _ in engine.alerts)
-    assert list(engine._states["sensor"]["pm1_0"].buffer) == [10.] * 40
-
-
-def test_cooldown_keys_cannot_collide():
-    engine = SensorDrift()
-    assert engine._alert_cooldown("a_b", "c", "drift", 0)
-    assert engine._alert_cooldown("a", "b_c", "drift", 0)
-
-
 def test_nonfinite_timestamp_does_not_mutate_engine():
-    engine = SensorDrift()
+    engine = SensorHealth()
     with pytest.raises(ValueError):
         engine.data_processing("s", {"unix_timestamp": np.nan, "pm1_0": -1})
-    assert not engine.alerts
+    assert not engine.events
     assert not engine._states
 
 
@@ -129,7 +105,7 @@ def test_plots_separate_sensors_and_forward_alpha(tmp_path, monkeypatch):
     assert all(call[2] == 0.05 for call in calls)
 
 
-@pytest.mark.parametrize("args", [["stream", "missing", "--window", "0"],
+@pytest.mark.parametrize("args", [["stream", "missing", "--event-update-interval", "nan"],
                                   ["periods", "missing", "-o", "unused", "--alpha", "nan"]])
 def test_cli_bad_configuration_returns_failure(args, caplog):
     assert main(args) == 1
@@ -159,14 +135,6 @@ def test_window_selection_excludes_left_endpoint():
 def test_offline_import_does_not_load_live_modules():
     code = "import safe; import sys; assert not any(x in sys.modules for x in ['serial', 'paho.mqtt.client', 'mintsXU4.mintsDefinitions', 'mintsXU4.mintsLatest'])"
     subprocess.run([sys.executable, "-c", code], check=True)
-
-
-def test_out_of_order_reading_is_rejected_without_changing_history():
-    engine = SensorDrift()
-    engine.data_processing("s", {"unix_timestamp": 2, "x": 1})
-    with pytest.raises(ValueError, match="out-of-order"):
-        engine.data_processing("s", {"unix_timestamp": 1, "x": 2})
-    assert list(engine._states["s"]["x"].buffer) == [1]
 
 
 def test_daily_loader_annotated_csv_overlap_and_nonfinite(tmp_path, monkeypatch):

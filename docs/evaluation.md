@@ -50,6 +50,12 @@ incident matches at most one fault; one fault may be matched by several incident
 - **False actionable incidents** are warning/critical incidents with no attributed
   fault, whether or not rate limiting suppressed their notification. They are
   reported per sensor-day of scored exposure (elapsed time, including gaps).
+- **Misdiagnosed incidents** are unattributed warning/critical incidents whose first
+  actionable observation falls inside a labeled fault on the same sensor and
+  metric: the sensor really was faulty, but the category is incompatible with the
+  label (for example reference drift evidence during a freeze). They are reported
+  separately and are neither false actionable incidents nor detections. An
+  incident that first alarms before or after the fault interval stays false.
 - Delays are measured from fault onset to the first matching observation, for
   detected faults only; inspect recall alongside them.
 - Notification counts verify that each incident notifies at most once.

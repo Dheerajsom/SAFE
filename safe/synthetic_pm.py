@@ -405,7 +405,8 @@ def evaluate(directory=DEFAULT_DIRECTORY, references=False):
     matched = {i for f in row["faults"] for i in f["incident_ids"]}
     false = []
     for event in row["events"]:
-        if event["id"] in row["scored_actionable_ids"] and event["id"] not in matched:
+        if (event["id"] in row["scored_actionable_ids"] and event["id"] not in matched
+                and event["id"] not in row["misdiagnosed_ids"]):
             first = event["started_at"]
             windows = sorted({c.notes for c in context if c.sensor == event["sensor"]
                               and c.start - 3600 <= first < c.end + 6 * 3600})
@@ -431,14 +432,18 @@ def write_report(reports, output):
              f"Generator revision {GENERATOR_REVISION}; 6 co-located nodes x 7 PM bins, 90 days at 5 min.",
              "Synthetic evidence only; not a field-accuracy claim. Timestamp faults are removed by",
              "the loader before the engine sees them and are checked separately.", "",
-             "| Mode | Faults | Detected | Actionable | Missed | False actionable incidents | per sensor-day |",
-             "|---|---:|---:|---:|---:|---:|---:|"]
+             "Misdiagnosed incidents first alarmed inside a labeled fault on the same bin but",
+             "with an incompatible category; they earn no detection credit and are not false.", "",
+             "| Mode | Faults | Detected | Actionable | Missed | False actionable incidents | per sensor-day "
+             "| Misdiagnosed incidents |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
     for mode, report in reports.items():
         row = report["by_scenario"][0]
         actionable = sum(f["actionable_detection_delay_seconds"] is not None for f in row["faults"])
         lines.append(f"| {mode} | {row['expected_faults']} | {row['detected_faults']} | {actionable} | "
                      f"{row['missed_faults']} | {row['false_actionable_incidents']} | "
-                     f"{row['false_actionable_incidents_per_sensor_day']:.3f} |")
+                     f"{row['false_actionable_incidents_per_sensor_day']:.3f} | "
+                     f"{row['misdiagnosed_actionable_incidents']} |")
     for mode, report in reports.items():
         row = report["by_scenario"][0]
         lines += ["", f"## {mode}", "", "| Fault | Node | Bin | Category | Detected | Actionable delay (h) |",

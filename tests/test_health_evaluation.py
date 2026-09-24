@@ -152,3 +152,22 @@ def test_health_cli_failures_are_nonzero(tmp_path):
         proc = subprocess.run([sys.executable, "-m", "safe.cli", "health", *extra,
                                "-o", str(tmp_path / "out")], capture_output=True)
         assert proc.returncode != 0
+
+
+def test_wrong_category_alarm_inside_fault_is_misdiagnosed_not_false_or_detected():
+    scenario = Scenario("s", (), (Fault("f", "s", "m", "freeze", 10, 20),),
+                        0, 100, (("s", "m"),), sampling_interval_seconds=1)
+    events = [{"id": e, "severity": "warning", "notification_count": 1} for e in ("inside", "before", "other")]
+    observations = [
+        # Reference-drift evidence during a freeze: right time, incompatible category.
+        dict(id="inside", sensor="s", metric="m", timestamp=12, categories=["gradual_degradation"], severity="warning"),
+        # First alarmed before the fault; later observations inside it do not excuse it.
+        dict(id="before", sensor="s", metric="m", timestamp=5, categories=["gradual_degradation"], severity="warning"),
+        dict(id="before", sensor="s", metric="m", timestamp=15, categories=["gradual_degradation"], severity="warning"),
+        # Same time, different metric: no fault there, so it is false.
+        dict(id="other", sensor="s", metric="n", timestamp=12, categories=["gradual_degradation"], severity="warning")]
+    result = score_incidents(scenario, events, observations, [])
+    assert result["misdiagnosed_ids"] == ["inside"]
+    assert result["misdiagnosed_actionable_incidents"] == 1
+    assert result["false_actionable_incidents"] == 2
+    assert result["detected_faults"] == 0

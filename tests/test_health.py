@@ -264,8 +264,11 @@ def test_sensor_tracking_reference_through_trend_is_not_drift():
     assert engine._states[("s", "temperature")].reference_drift_evidence is None
 
 
-def _pm_gain_run(sensor_gain, **changes):
-    """A PM sensor reading `sensor_gain` x a trusted reference through a 6x episode."""
+def _pm_gain_run(sensor_gain, scatter=0.0, **changes):
+    """A PM sensor reading `sensor_gain` x a trusted reference through a 6x episode.
+
+    `scatter` adds independent percentage noise, like co-located sensors show.
+    """
     profile = replace(short_profile(), hard_bounds=(0.0, 10000.0), residual_scale_floor=1,
                       step_min_effect=5, freeze_at_startup=False, freeze_tolerance=0,
                       reference_drift_tolerance=2, **{**dict(
@@ -280,6 +283,7 @@ def _pm_gain_run(sensor_gain, **changes):
     reference = 10 * np.concatenate([np.ones(200), np.linspace(1, 6, 200), 6 * np.ones(200)])
     reference = reference * (1 + rng.normal(0, .02, reference.size))
     gain = np.concatenate([np.full(200, 1.06), np.asarray(sensor_gain, dtype=float) * np.ones(400)])
+    gain = gain * (1 + rng.normal(0, scatter, gain.size))
     for index, (ref, g) in enumerate(zip(reference, gain)):
         t = index * 60
         engine.data_processing("s", {"unix_timestamp": t, "pm2_5": ref * g},
@@ -299,6 +303,19 @@ def test_pm_gain_difference_is_not_drift_during_an_episode():
 def test_pm_gain_drift_against_reference_is_still_flagged():
     # At 6x concentration a gain drifting to 1.7 grows fast enough to read as a shift.
     categories = _pm_gain_run(np.linspace(1.06, 1.7, 400))
+    assert categories and set(categories) <= {"gradual_degradation", "abrupt_shift"}
+
+
+def test_pm_percentage_scatter_scales_the_residual_yardstick():
+    # 5% independent scatter is ~3 ug/m3 at 60 ug/m3; judged by a scale learned at
+    # 10 ug/m3 it looks like repeated outliers, judged in percent it is ordinary.
+    assert _pm_gain_run(1.06, scatter=0.05, reference_ratio_floor=0,
+                        reference_drift_relative_tolerance=0)
+    assert _pm_gain_run(1.06, scatter=0.05) == []
+
+
+def test_pm_step_against_reference_is_flagged_despite_scatter():
+    categories = _pm_gain_run(1.06 * 1.5, scatter=0.05)
     assert categories and set(categories) <= {"gradual_degradation", "abrupt_shift"}
 
 

@@ -225,7 +225,9 @@ health checkpoint schema is 1. Engine 3.0.0 compares PM and particle-count bins 
 a reference by ratio rather than difference (profile `reference_ratio_floor`) and
 requires reference drift to exceed both `reference_drift_tolerance` and
 `reference_drift_relative_tolerance` times the reference-predicted level, so a
-co-located sensor a few percent off does not alarm during pollution episodes.
+co-located sensor a few percent off does not alarm during pollution episodes. The
+typical percentage scatter against the reference is learned with the ratio, and the
+residual scale for outlier and step checks grows with it at high concentrations.
 Engine 2.0.0 checkpoints are rejected; start a new engine.
 Checkpoints embed complete configuration, detector history, baseline bins, incident
 IDs, cooldowns, notification attempts, and engine version. Writes use a same-directory

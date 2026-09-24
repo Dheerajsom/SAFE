@@ -98,9 +98,12 @@ def replay_health(scenario, configuration=None):
 def score_incidents(scenario, events, observations, notifications):
     """One incident matches at most one fault; one fault may have several incidents.
 
-    Report diagnostic recall and actionable recall separately. False actionable
-    incidents include every unmatched warning/critical incident, even if rate
-    limiting suppressed its notification. No post-fault grace hides late alarms.
+    Report diagnostic recall and actionable recall separately. An unmatched
+    warning/critical incident that first became actionable inside a labeled fault
+    on the same sensor and metric is a misdiagnosed incident: the right alarm time
+    with an incompatible category. It earns no detection credit and is counted
+    separately. Every other unmatched warning/critical incident is false, even if
+    rate limiting suppressed its notification. No post-fault grace hides late alarms.
     """
     faults = [{**asdict(f), "incident_ids": [], "detection_delay_seconds": None,
                "actionable_detection_delay_seconds": None} for f in sorted(scenario.faults, key=lambda f: (f.start, f.id))]
@@ -137,7 +140,17 @@ def score_incidents(scenario, events, observations, notifications):
     scored_ids = {o["id"] for o in observations if o["severity"] != "info"
                   and any(start <= o["timestamp"] < end for start, end in intervals)}
     actionable = [e for e in events if e["id"] in scored_ids]
-    false = [e for e in actionable if e["id"] not in attribution]
+    first_actionable = {}
+    for o in sorted(observations, key=lambda o: o["timestamp"]):
+        if (o["severity"] != "info" and o["id"] not in first_actionable
+                and any(start <= o["timestamp"] < end for start, end in intervals)):
+            first_actionable[o["id"]] = o
+    misdiagnosed_ids = sorted(
+        e["id"] for e in actionable if e["id"] not in attribution
+        and any(f["sensor"] == first_actionable[e["id"]]["sensor"]
+                and f["metric"] == first_actionable[e["id"]]["metric"]
+                and f["start"] <= first_actionable[e["id"]]["timestamp"] < f["end"] for f in faults))
+    false = [e for e in actionable if e["id"] not in attribution and e["id"] not in misdiagnosed_ids]
     delays = [f["detection_delay_seconds"] for f in faults if f["incident_ids"]]
     actionable_delays = [f["actionable_detection_delay_seconds"] for f in faults
                          if f["actionable_detection_delay_seconds"] is not None]
@@ -149,6 +162,7 @@ def score_incidents(scenario, events, observations, notifications):
                 actionable_recall=len(actionable_delays) / len(faults) if faults else None,
                 incidents=len(events), actionable_incidents=len(actionable),
                 false_actionable_incidents=len(false), false_actionable_incidents_per_sensor_day=len(false) / exposure,
+                misdiagnosed_actionable_incidents=len(misdiagnosed_ids),
                 incident_precision=matched_actionable / len(actionable) if actionable else None,
                 median_detection_delay_seconds=float(np.median(delays)) if delays else None,
                 median_actionable_detection_delay_seconds=float(np.median(actionable_delays)) if actionable_delays else None,
@@ -157,7 +171,7 @@ def score_incidents(scenario, events, observations, notifications):
                 observations=len(observations), observations_per_incident=len(observations) / len(events) if events else None,
                 notifications=len(notifications),
                 max_notifications_per_incident=max((e["notification_count"] for e in events), default=0),
-                scored_actionable_ids=sorted(scored_ids),
+                scored_actionable_ids=sorted(scored_ids), misdiagnosed_ids=misdiagnosed_ids,
                 faults=faults, events=events)
 
 
@@ -188,11 +202,14 @@ def evaluate_health(scenarios, configuration=None):
                          if e["metric"] == metric and e["id"] in r["scored_actionable_ids"]]
         matched = {(r["name"], identity) for r in rows for f in r["faults"]
                    if f["metric"] == metric for identity in f["incident_ids"]}
-        metric_fp = sum((name, e["id"]) not in matched for name, e in metric_events)
+        misdiagnosed = {(r["name"], identity) for r in rows for identity in r["misdiagnosed_ids"]}
+        metric_fp = sum((name, e["id"]) not in matched | misdiagnosed for name, e in metric_events)
         metric_exposure = sum(sum(end - start for start, end in s.parameters.get("scoring_intervals", [(s.start, s.end)]))
                               / 86400 * len({ss for ss, mm in s.identities if mm == metric}) for s in scenarios)
         by_metric[metric] = dict(expected=len(metric_faults), detected=sum(bool(f["incident_ids"]) for f in metric_faults),
                                 actionable_incidents=len(metric_events), false_actionable_incidents=metric_fp,
+                                misdiagnosed_actionable_incidents=sum(key in misdiagnosed for key in
+                                                                      ((n, e["id"]) for n, e in metric_events)),
                                 false_actionable_incidents_per_sensor_day=metric_fp / metric_exposure,
                                 sensor_days=metric_exposure)
     return dict(schema_version=2, engine_version=ENGINE_VERSION, python=platform.python_version(),
@@ -200,6 +217,8 @@ def evaluate_health(scenarios, configuration=None):
                 overall=dict(expected_faults=expected, detected_faults=detected, missed_faults=expected - detected,
                              recall=detected / expected if expected else None,
                              false_actionable_incidents=false, sensor_days=days,
+                             misdiagnosed_actionable_incidents=sum(r["misdiagnosed_actionable_incidents"]
+                                                                   for r in rows),
                              false_actionable_incidents_per_sensor_day=false / days,
                              notifications=sum(r["notifications"] for r in rows)))
 
@@ -245,15 +264,19 @@ def write_comparison(output, seeds=(1729, 2718, 31415), configuration=None):
     root.mkdir(parents=True, exist_ok=True)
     report = {"splits": {}, "tuning_policy": "fixed configuration; no automated fitting to evaluation labels"}
     lines = ["# SAFE health evaluation", "", "Synthetic evidence only; field validation pending.", "",
-             "False positives count actionable incidents, not individual readings.", "",
-             "| Split | Incidents | False actionable incidents | Detected faults | Notifications |",
-             "|---|---:|---:|---:|---:|"]
+             "False positives count actionable incidents, not individual readings. Misdiagnosed",
+             "incidents alarmed inside a labeled fault with an incompatible category; they are",
+             "neither false nor detections.", "",
+             "| Split | Incidents | False actionable incidents | Misdiagnosed incidents | Detected faults "
+             "| Notifications |",
+             "|---|---:|---:|---:|---:|---:|"]
     for split, seed in zip(("calibration", "development", "holdout"), seeds):
         health = evaluate_health(synthetic_scenarios(seed), configuration)
         report["splits"][split] = dict(seed=seed, health=health, acceptance=acceptance(health))
         h = health["overall"]
         lines.append(f"| {split} ({seed}) | "
                      f"{sum(r['incidents'] for r in health['by_scenario'])} | {h['false_actionable_incidents']} | "
+                     f"{h['misdiagnosed_actionable_incidents']} | "
                      f"{h['detected_faults']}/{h['expected_faults']} | {h['notifications']} |")
     lines += ["", "Holdout targets:", ""]
     lines += [f"- {name}: {'PASS' if ok else 'FAIL'}" for name, ok in report["splits"]["holdout"]["acceptance"].items()]

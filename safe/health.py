@@ -127,6 +127,7 @@ class _HealthState:
         self.mode = "WARMING_UP"
         self.peer_mode = False
         self.peer_offset = None
+        self.peer_spread = None  # ratio mode: typical |log ratio| scatter around peer_offset
         self.window_category = None
         self.window_evidence = {}
         self.reference_drift_confirmations = 0
@@ -488,6 +489,8 @@ class SensorHealth:
         if peer is not None and state.peer_offset is None:
             if len(state.peer_samples) >= p.minimum_samples:
                 state.peer_offset = float(np.median(state.peer_samples))
+                if p.reference_ratio_floor:
+                    state.peer_spread = robust_scale(list(state.peer_samples), 0.0)[1]
                 state.peer_samples.clear()
             elif abs(value - expected) < p.step_min_effect:
                 state.peer_samples.append(_peer_sample(p, value, peer))
@@ -503,6 +506,11 @@ class SensorHealth:
             state.reference_drift_evidence = None
         if peer is not None:
             expected = _peer_expected(p, peer, state.peer_offset)
+            if state.peer_spread is not None:
+                # Healthy gain-type sensors disagree with a reference by a roughly
+                # constant percentage, so the residual scale grows with the level.
+                # The ambient scale, learned mostly at lower levels, stays the floor.
+                scale = max(scale, state.peer_spread * (expected + p.reference_ratio_floor))
         residual = value - expected
         z = residual / scale
         anomalous = abs(z) >= p.outlier_threshold and abs(residual) >= p.step_min_effect

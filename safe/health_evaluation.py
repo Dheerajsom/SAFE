@@ -3,15 +3,17 @@
 See docs/evaluation.md for scoring units and the limitations of attribution.
 """
 
+from collections.abc import Iterable
 from dataclasses import asdict
 import json
 from pathlib import Path
 import platform
+from typing import Any
 
 import numpy as np
 
 from safe.health import SensorHealth, ENGINE_VERSION
-from safe.scenarios import synthetic_scenarios
+from safe.scenarios import Scenario, synthetic_scenarios
 
 
 HEALTH_CATEGORIES = {
@@ -35,7 +37,21 @@ HEALTH_CATEGORIES = {
 }
 
 
-def validate_scenario(scenario):
+def _scoring_intervals(scenario: Scenario) -> list:
+    """Scored [start, end) intervals; the whole observation unless the scenario restricts it."""
+    return scenario.parameters.get("scoring_intervals", [(scenario.start, scenario.end)])
+
+
+def _scored_seconds(scenario: Scenario) -> float:
+    return sum(end - start for start, end in _scoring_intervals(scenario))
+
+
+def _in_intervals(timestamp: float, intervals: list) -> bool:
+    return any(start <= timestamp < end for start, end in intervals)
+
+
+def validate_scenario(scenario: Scenario) -> None:
+    """Reject scenarios whose identities, faults, or readings are inconsistent."""
     if not np.isfinite([scenario.start, scenario.end]).all() or scenario.end <= scenario.start:
         raise ValueError("scenario must have a finite positive observation interval")
     identities = set(scenario.identities)
@@ -58,7 +74,8 @@ def validate_scenario(scenario):
             raise ValueError("readings must be finite; represent gaps by absent readings")
 
 
-def replay_health(scenario, configuration=None):
+def replay_health(scenario: Scenario, configuration: dict | None = None) -> tuple[list, list, list, dict]:
+    """Replay a scenario; return (final events, per-observation records, notifications, configuration)."""
     validate_scenario(scenario)
     observations, notifications, final = [], [], {}
 
@@ -95,7 +112,8 @@ def replay_health(scenario, configuration=None):
     return list(final.values()), observations, notifications, engine.configuration()
 
 
-def score_incidents(scenario, events, observations, notifications):
+def score_incidents(scenario: Scenario, events: list[dict], observations: list[dict],
+                    notifications: list[dict]) -> dict[str, Any]:
     """One incident matches at most one fault; one fault may have several incidents.
 
     Report diagnostic recall and actionable recall separately. An unmatched
@@ -107,11 +125,11 @@ def score_incidents(scenario, events, observations, notifications):
     """
     faults = [{**asdict(f), "incident_ids": [], "detection_delay_seconds": None,
                "actionable_detection_delay_seconds": None} for f in sorted(scenario.faults, key=lambda f: (f.start, f.id))]
+    faults_by_id = {f["id"]: f for f in faults}
     attribution = {}
     for observation in observations:
         if observation["id"] in attribution:
-            candidate = next(f for f in faults if f["id"] == attribution[observation["id"]])
-            candidates = [candidate]
+            candidates = [faults_by_id[attribution[observation["id"]]]]
         else:
             candidates = faults
         eligible = set().union(*(HEALTH_CATEGORIES.get(c, set()) for c in observation["categories"]))
@@ -129,7 +147,7 @@ def score_incidents(scenario, events, observations, notifications):
             matched["detection_delay_seconds"] = delay
         if observation["severity"] != "info" and matched["actionable_detection_delay_seconds"] is None:
             matched["actionable_detection_delay_seconds"] = delay
-    intervals = scenario.parameters.get("scoring_intervals", [(scenario.start, scenario.end)])
+    intervals = _scoring_intervals(scenario)
     previous_end = scenario.start
     for start, end in intervals:
         if not scenario.start <= previous_end <= start < end <= scenario.end:
@@ -138,12 +156,12 @@ def score_incidents(scenario, events, observations, notifications):
     if not intervals:
         raise ValueError("at least one scoring interval is required")
     scored_ids = {o["id"] for o in observations if o["severity"] != "info"
-                  and any(start <= o["timestamp"] < end for start, end in intervals)}
+                  and _in_intervals(o["timestamp"], intervals)}
     actionable = [e for e in events if e["id"] in scored_ids]
     first_actionable = {}
     for o in sorted(observations, key=lambda o: o["timestamp"]):
         if (o["severity"] != "info" and o["id"] not in first_actionable
-                and any(start <= o["timestamp"] < end for start, end in intervals)):
+                and _in_intervals(o["timestamp"], intervals)):
             first_actionable[o["id"]] = o
     misdiagnosed_ids = sorted(
         e["id"] for e in actionable if e["id"] not in attribution
@@ -154,7 +172,7 @@ def score_incidents(scenario, events, observations, notifications):
     delays = [f["detection_delay_seconds"] for f in faults if f["incident_ids"]]
     actionable_delays = [f["actionable_detection_delay_seconds"] for f in faults
                          if f["actionable_detection_delay_seconds"] is not None]
-    exposure = sum(end - start for start, end in intervals) / 86400 * len({s for s, _ in scenario.identities})
+    exposure = _scored_seconds(scenario) / 86400 * len({s for s, _ in scenario.identities})
     matched_actionable = sum(e["id"] in attribution for e in actionable)
     return dict(name=scenario.name, sensor_days=exposure, expected_faults=len(faults),
                 detected_faults=len(delays), missed_faults=len(faults) - len(delays),
@@ -175,7 +193,8 @@ def score_incidents(scenario, events, observations, notifications):
                 faults=faults, events=events)
 
 
-def evaluate_health(scenarios, configuration=None):
+def evaluate_health(scenarios: Iterable[Scenario], configuration: dict | None = None) -> dict[str, Any]:
+    """Replay and score every scenario; aggregate by fault category, metric, and overall."""
     scenarios = list(scenarios)
     if not scenarios or len({s.name for s in scenarios}) != len(scenarios):
         raise ValueError("provide scenarios with unique names")
@@ -204,8 +223,8 @@ def evaluate_health(scenarios, configuration=None):
                    if f["metric"] == metric for identity in f["incident_ids"]}
         misdiagnosed = {(r["name"], identity) for r in rows for identity in r["misdiagnosed_ids"]}
         metric_fp = sum((name, e["id"]) not in matched | misdiagnosed for name, e in metric_events)
-        metric_exposure = sum(sum(end - start for start, end in s.parameters.get("scoring_intervals", [(s.start, s.end)]))
-                              / 86400 * len({ss for ss, mm in s.identities if mm == metric}) for s in scenarios)
+        metric_exposure = sum(_scored_seconds(s) / 86400 * len({ss for ss, mm in s.identities if mm == metric})
+                              for s in scenarios)
         by_metric[metric] = dict(expected=len(metric_faults), detected=sum(bool(f["incident_ids"]) for f in metric_faults),
                                 actionable_incidents=len(metric_events), false_actionable_incidents=metric_fp,
                                 misdiagnosed_actionable_incidents=sum(key in misdiagnosed for key in
@@ -223,7 +242,8 @@ def evaluate_health(scenarios, configuration=None):
                              notifications=sum(r["notifications"] for r in rows)))
 
 
-def acceptance(report):
+def acceptance(report: dict[str, Any]) -> dict[str, bool]:
+    """Holdout acceptance targets: target name -> pass."""
     categories = report["by_fault_category"]
 
     def recall(category, actionable=False):
@@ -252,7 +272,8 @@ def acceptance(report):
                 for r in report["by_scenario"] if r["name"] == "healthy_diurnal" for e in r["events"])}
 
 
-def write_comparison(output, seeds=(1729, 2718, 31415), configuration=None):
+def write_comparison(output: str | Path, seeds: tuple[int, int, int] = (1729, 2718, 31415),
+                     configuration: dict | None = None) -> dict[str, Any]:
     """Disjoint predeclared seeds: calibration, development, untouched validation.
 
     This runner never adjusts a parameter against any of these results. The seed

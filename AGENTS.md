@@ -49,7 +49,8 @@ python dataVisualizer.py
   drift tests with effect-size gates and AR(1) effective-sample-size (n_eff)
   correction.
 - `safe/config.py`: `HARD_BOUNDS`, PM/PC metric lists, effect-size gates,
-  flat-step thresholds.
+  flat-step thresholds, `ENGINE_VERSION`, and the fixed `SensorHealth`
+  detector heuristics (changing one changes detection).
 - `safe/loader.py`: InfluxDB-export CSV loading (`load_pivoted_dataframe`) and
   streaming replay into `SensorHealth` (`replay_csv`, `replay_csvs`); pivot NaNs
   are absent fields and are never fed to the engine.

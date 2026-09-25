@@ -417,7 +417,6 @@ def evaluate(directory=DEFAULT_DIRECTORY, references=False):
     return report
 
 
-
 def _hours(seconds):
     return "—" if seconds is None else f"{seconds / 3600:.1f}"
 

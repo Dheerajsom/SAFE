@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, dataclass, fields
 import math
+from typing import Any
 
 from safe.config import HARD_BOUNDS, PM_METRICS
 
@@ -58,7 +59,7 @@ class MetricProfile:
     max_samples: int = 4096
     hard_bounds: tuple[float, float] | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         integer_names = {"minimum_samples", "step_readings", "freeze_min_readings",
                          "recovery_readings", "seasonal_bins", "seasonal_cycles",
                          "persistence_evaluations", "max_samples"}
@@ -97,11 +98,13 @@ class MetricProfile:
         if self.enable_page_hinkley and not self.stationary_residuals:
             raise ValueError("Page-Hinkley requires explicitly stationary residuals")
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def metric_profile(metric, deployment="outdoor", expected_interval_seconds=300):
+def metric_profile(metric: str, deployment: str = "outdoor",
+                   expected_interval_seconds: float = 300) -> MetricProfile:
+    """Default profile for a metric, deployment type, and reporting cadence."""
     if deployment not in {"outdoor", "indoor", "mobile", "laboratory"}:
         raise ValueError("unknown deployment type")
     options = dict(expected_interval_seconds=expected_interval_seconds,
@@ -139,7 +142,8 @@ class ProfileRegistry:
     Equal-specificity ties use the last entry, enabling explicit local overrides.
     """
 
-    def __init__(self, deployment="outdoor", expected_interval_seconds=300, overrides=()):
+    def __init__(self, deployment: str = "outdoor", expected_interval_seconds: float = 300,
+                 overrides: tuple | list = ()) -> None:
         metric_profile("temperature", deployment, expected_interval_seconds)
         self.deployment = deployment
         self.expected_interval_seconds = expected_interval_seconds
@@ -152,7 +156,8 @@ class ProfileRegistry:
             self.overrides.append({"match": dict(item["match"]),
                                    "profile": MetricProfile(**item["profile"]).to_dict()})
 
-    def resolve(self, sensor, metric, model=None, site=None):
+    def resolve(self, sensor: str, metric: str, model: str | None = None,
+                site: str | None = None) -> MetricProfile:
         context = dict(sensor=sensor, metric=metric, model=model, site=site,
                        deployment=self.deployment, cadence=self.expected_interval_seconds)
         matches = [(len(item["match"]), i, item) for i, item in enumerate(self.overrides)
@@ -161,7 +166,7 @@ class ProfileRegistry:
             return MetricProfile(**max(matches, key=lambda x: (x[0], x[1]))[2]["profile"])
         return metric_profile(metric, self.deployment, self.expected_interval_seconds)
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return dict(deployment=self.deployment, expected_interval_seconds=self.expected_interval_seconds,
                     overrides=self.overrides)
 
@@ -178,7 +183,7 @@ class SensorRules:
     dewpoint_tolerance: float = 0.5
     simultaneous_jump_metrics: int = 3
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         object.__setattr__(self, "ordered_metrics", tuple(self.ordered_metrics))
         object.__setattr__(self, "healthy_status_values", tuple(self.healthy_status_values))
         if len(set(self.ordered_metrics)) != len(self.ordered_metrics):

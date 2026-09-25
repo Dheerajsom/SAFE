@@ -5,6 +5,10 @@
 #  the health engine (safe.health, safe.profiles) and the period analysis (safe.periods).
 # ***************************************************************************
 
+# Health engine release. Detection changes must bump it: saved states refuse
+# to load across versions, and every incident records the version it came from.
+ENGINE_VERSION = "3.0.0"
+
 # Cleaner display names for known measurements
 SENSOR_DISPLAY_NAMES = {
     'IPS7100MHC001': 'IPS7100_MHC_001',
@@ -63,3 +67,56 @@ DEFAULT_FLAT_MEAN_SHIFT = 0.01
 
 # Variance below this is considered flat (a constant signal)
 FLAT_VAR_THRESHOLD = 1e-12
+
+
+# --------------------------------------------------------------------------
+# SensorHealth detector heuristics
+# --------------------------------------------------------------------------
+# Fixed engine logic rather than per-metric profile settings: changing any of
+# these changes detection behavior and requires an ENGINE_VERSION bump.
+
+# Fraction of a zero run's readings that must contradict clean air for a freeze.
+STUCK_ZERO_SUPPORT = 0.8
+# Shortest zero run that can hold shift/drift detection as a pending stuck-at-zero.
+STUCK_ZERO_MIN_RUN = 2
+# A value this many freeze tolerances from the freeze anchor proves the series varies.
+VARIABILITY_TOLERANCE_FACTOR = 4
+
+# Cadence: median of the last CADENCE_HISTORY intervals, once CADENCE_MIN_INTERVALS
+# exist, degrades when it exceeds CADENCE_DEGRADATION_FACTOR x the expected interval.
+CADENCE_HISTORY = 12
+CADENCE_MIN_INTERVALS = 11
+CADENCE_DEGRADATION_FACTOR = 1.5
+
+# Consecutive invalid readings that restart an unfinished warmup.
+INVALID_RUN_RESTART = 3
+
+# Provisional warmup gate: once PROVISIONAL_MIN_SAMPLES exist, a reading further
+# than max(PROVISIONAL_OUTLIER_SCALES x robust scale, PROVISIONAL_OUTLIER_STEPS x
+# step_min_effect) from the last PROVISIONAL_WINDOW warmup values is contamination.
+PROVISIONAL_MIN_SAMPLES = 8
+PROVISIONAL_WINDOW = 24
+PROVISIONAL_OUTLIER_SCALES = 12
+PROVISIONAL_OUTLIER_STEPS = 4
+
+# Windowed tests need at least this many readings per half-window (or half of
+# minimum_samples, whichever is larger); a noise change needs this std ratio.
+WINDOW_MIN_SAMPLES = 8
+NOISE_STD_RATIO = 2
+
+# Excess of residual anomalies in a window: both signs at least
+# ANOMALY_EXCESS_MIN_EACH_SIGN, and in total at least max(ANOMALY_EXCESS_MIN,
+# ANOMALY_EXCESS_FRACTION x window readings).
+ANOMALY_EXCESS_MIN_EACH_SIGN = 2
+ANOMALY_EXCESS_MIN = 4
+ANOMALY_EXCESS_FRACTION = 0.1
+
+# Evidence-strength heuristics attached to incidents; never calibrated probabilities.
+CONFIDENCE_DEFINITE = 1.0      # physically impossible value
+CONFIDENCE_OBSERVED = 0.99     # directly observed timing fault (silence, clock)
+CONFIDENCE_RULE = 0.95         # rule violation or confirmed freeze
+CONFIDENCE_PERSISTENT = 0.85   # persistent residual shift
+CONFIDENCE_DEFAULT = 0.8       # availability degradation, reference drift
+CONFIDENCE_STATISTICAL = 0.7   # windowed or cumulative statistical evidence
+CONFIDENCE_WEAK = 0.6          # possible restart, startup contamination
+CONFIDENCE_ISOLATED = 0.55     # single residual anomaly

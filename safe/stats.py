@@ -17,6 +17,9 @@
 #       a per-metric threshold".
 # ***************************************************************************
 
+from collections.abc import Iterable
+from typing import Any
+
 import numpy as np
 from scipy import stats
 
@@ -40,27 +43,45 @@ MIN_EFFECTIVE_N = 3.0
 MAX_RHO = 0.98
 
 
-def validate_alpha(p_alpha):
+def median(values: Iterable[float]) -> float:
+    """Median of finite values, bit-identical to ``float(np.median(values))``.
+
+    Streaming detectors take medians of a few dozen values per reading, where
+    numpy's per-call overhead dominates. Like numpy, the middle value(s) are
+    summed from +0.0, so a median of negative zeros is +0.0.
+    """
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return 0.0 + ordered[middle]
+    return (0.0 + ordered[middle - 1] + ordered[middle]) / 2
+
+
+def validate_alpha(p_alpha: float) -> None:
     """Reject invalid significance levels before any data or output work."""
     if not np.isfinite(p_alpha) or not 0 < p_alpha < 1:
         raise ValueError("p_alpha must be finite and strictly between 0 and 1")
 
 
-def _sample(values):
+def _sample(values: Any) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     if values.ndim != 1 or not np.isfinite(values).all():
         raise ValueError("samples must be one-dimensional and contain only finite values")
     return values
 
 
-def lag1_autocorrelation(x):
+def lag1_autocorrelation(x: Any) -> float:
     """Lag-1 autocorrelation of a 1-D array, clipped to [0, MAX_RHO].
 
     Negative estimates are clipped to 0: anti-correlated noise would *inflate*
     n_eff above n, and we only ever want the conservative correction.
     Returns 0.0 when the series is too short or flat for a stable estimate.
     """
-    x = _sample(x)
+    return _lag1(_sample(x))
+
+
+def _lag1(x: np.ndarray) -> float:
+    """lag1_autocorrelation for an already validated sample."""
     if x.size < 10:
         return 0.0
     a, b = x[:-1], x[1:]
@@ -71,14 +92,18 @@ def lag1_autocorrelation(x):
     return float(np.clip(rho, 0.0, MAX_RHO))
 
 
-def effective_sample_size(x):
-    """AR(1) effective sample size: n_eff = n * (1 - rho) / (1 + rho)."""
-    n = int(np.asarray(x).size)
-    rho = lag1_autocorrelation(x)
-    return n * (1.0 - rho) / (1.0 + rho), rho
+def effective_sample_size(x: Any) -> tuple[float, float]:
+    """AR(1) effective sample size: n_eff = n * (1 - rho) / (1 + rho). Returns (n_eff, rho)."""
+    return _effective_sample_size(_sample(x))
 
 
-def _welch_test(old, new, n_eff_old, n_eff_new):
+def _effective_sample_size(x: np.ndarray) -> tuple[float, float]:
+    rho = _lag1(x)
+    return x.size * (1.0 - rho) / (1.0 + rho), rho
+
+
+def _welch_test(old: np.ndarray, new: np.ndarray, mean_delta: float,
+                n_eff_old: float, n_eff_new: float) -> float:
     """Welch's t-test using effective sample sizes.
 
     With n_eff = n this reproduces scipy.stats.ttest_ind(equal_var=False).
@@ -93,7 +118,7 @@ def _welch_test(old, new, n_eff_old, n_eff_new):
     if se_sq <= 0.0:
         return 1.0
 
-    t = (float(np.mean(new)) - float(np.mean(old))) / se_sq ** 0.5
+    t = mean_delta / se_sq ** 0.5
     df = se_sq ** 2 / (
         (s1 / n_eff_old) ** 2 / (n_eff_old - 1.0)
         + (s2 / n_eff_new) ** 2 / (n_eff_new - 1.0)
@@ -101,14 +126,14 @@ def _welch_test(old, new, n_eff_old, n_eff_new):
     return 2.0 * float(stats.t.sf(abs(t), df))
 
 
-def _thin(x, n_eff):
+def _thin(x: np.ndarray, n_eff: float) -> np.ndarray:
     """Evenly-spaced subsample of ~n_eff approximately independent readings."""
     x = np.asarray(x, dtype=float)
     stride = max(int(np.ceil(x.size / max(n_eff, 1.0))), 1)
     return x[::stride]
 
 
-def _levene_test(old, new, n_eff_old, n_eff_new):
+def _levene_test(old: np.ndarray, new: np.ndarray, n_eff_old: float, n_eff_new: float) -> float:
     """Brown-Forsythe (median-centered) Levene test on thinned samples.
 
     Thinning to ~n_eff readings per side reduces serial correlation under an
@@ -125,7 +150,8 @@ def _levene_test(old, new, n_eff_old, n_eff_new):
     return float(p)
 
 
-def sample_comparison(old, new, p_alpha=0.01, metric=None, autocorr_correction=True):
+def sample_comparison(old: Any, new: Any, p_alpha: float = 0.01, metric: str | None = None,
+                      autocorr_correction: bool = True) -> dict[str, Any]:
     """Compare two samples; return descriptive stats + drift-test results.
 
     Parameters
@@ -185,8 +211,8 @@ def sample_comparison(old, new, p_alpha=0.01, metric=None, autocorr_correction=T
         std_ratio = 1.0
 
     if autocorr_correction:
-        n_eff_old, rho_old = effective_sample_size(old)
-        n_eff_new, rho_new = effective_sample_size(new)
+        n_eff_old, rho_old = _effective_sample_size(old)
+        n_eff_new, rho_new = _effective_sample_size(new)
     else:
         n_eff_old, rho_old = float(n_old), 0.0
         n_eff_new, rho_new = float(n_new), 0.0
@@ -198,7 +224,7 @@ def sample_comparison(old, new, p_alpha=0.01, metric=None, autocorr_correction=T
         mean_shift = mean_val_changed
         variance_shift = False
     else:
-        p_welch = _welch_test(old, new, n_eff_old, n_eff_new)
+        p_welch = _welch_test(old, new, mean_delta, n_eff_old, n_eff_new)
         p_levene = _levene_test(old, new, n_eff_old, n_eff_new)
 
         p_welch = 1.0 if np.isnan(p_welch) else max(p_welch, P_FLOOR)

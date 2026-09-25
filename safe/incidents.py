@@ -1,11 +1,15 @@
 """Correlation and notification policy, independent of statistical detectors."""
 
 from collections import deque
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import logging
+from typing import Any
+
+from safe.config import ENGINE_VERSION
 
 logger = logging.getLogger(__name__)
 SEVERITY = {"info": 0, "warning": 1, "critical": 2}
@@ -23,7 +27,7 @@ class HealthEvent:
     last_seen_at: float
     status: str = "open"
     evidence: dict = field(default_factory=dict)
-    engine_version: str = "3.0.0"
+    engine_version: str = ENGINE_VERSION
     configuration: dict = field(default_factory=dict)
     family: str = "change"
     detection_count: int = 0
@@ -33,13 +37,17 @@ class HealthEvent:
     recovery_count: int = 0
     closed_at: float | None = None
 
-    def to_dict(self):
-        return deepcopy(asdict(self))
+    def to_dict(self) -> dict[str, Any]:
+        """Detached copy: asdict already deep-copies every nested value."""
+        return asdict(self)
 
 
 class IncidentManager:
-    def __init__(self, history_limit=1000, notification_interval_seconds=1800,
-                 on_event=None, on_notification=None):
+    """Open, update, escalate, recover, and close incidents; rate-limit notifications."""
+
+    def __init__(self, history_limit: int = 1000, notification_interval_seconds: float = 1800,
+                 on_event: Callable[[str, dict], Any] | None = None,
+                 on_notification: Callable[[dict], Any] | None = None) -> None:
         if isinstance(history_limit, bool) or not isinstance(history_limit, int) or history_limit < 0:
             raise ValueError("history_limit must be a nonnegative integer")
         if (not isinstance(notification_interval_seconds, (int, float))
@@ -57,10 +65,13 @@ class IncidentManager:
         self.on_event = on_event
         self.on_notification = on_notification
 
-    def _publish(self, event, action):
-        snapshot = event.to_dict()
+    def _publish(self, event: HealthEvent, action: str) -> None:
         level = logging.DEBUG if action == "updated" else logging.INFO
-        if logger.isEnabledFor(level):
+        logged = logger.isEnabledFor(level)
+        if not logged and not self.on_event:
+            return
+        snapshot = event.to_dict()
+        if logged:
             logger.log(level, json.dumps({"action": action, "event": snapshot}, allow_nan=False, sort_keys=True))
         if self.on_event:
             try:
@@ -68,7 +79,7 @@ class IncidentManager:
             except Exception:
                 logger.exception("Health event handler failed")
 
-    def _notify(self, event, timestamp):
+    def _notify(self, event: HealthEvent, timestamp: float) -> None:
         key = (event.sensor, event.metric)
         previous = self.last_notification.get(key, -float("inf"))
         if (event.notification_count or SEVERITY[event.severity] < 1
@@ -85,8 +96,10 @@ class IncidentManager:
                 # Persist the attempt. Delivery guarantees belong to an external outbox.
                 logger.exception("Health notification handler failed; attempt is not retried")
 
-    def observe(self, sensor, metric, category, family, timestamp, severity, confidence,
-                evidence, configuration):
+    def observe(self, sensor: str, metric: str, category: str, family: str, timestamp: float,
+                severity: str, confidence: float, evidence: dict[str, Any],
+                configuration: dict[str, Any]) -> HealthEvent:
+        """Record one finding: open or update the (sensor, metric, family) incident."""
         key = (sensor, metric, family)
         event = self.active.get(key)
         action = "updated"
@@ -116,8 +129,9 @@ class IncidentManager:
         self._publish(event, action)
         return event
 
-    def recover(self, sensor, metric, timestamp, seen_families, duration, readings,
-                eligible_families=None):
+    def recover(self, sensor: str, metric: str, timestamp: float, seen_families: set[str],
+                duration: float, readings: int, eligible_families: Iterable[str] | None = None) -> None:
+        """Advance recovery of this series' unseen incidents; close those quiet long enough."""
         for key, event in list(self.active.items()):
             if key[:2] != (sensor, metric) or event.family in seen_families:
                 continue
@@ -136,10 +150,10 @@ class IncidentManager:
                 del self.active[key]
                 self._publish(event, "closed")
 
-    def events(self):
+    def events(self) -> list[HealthEvent]:
         return sorted([*self.history, *self.active.values()], key=lambda e: (e.started_at, e.id))
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         return {"history_limit": self.history.maxlen,
                 "notification_interval_seconds": self.notification_interval_seconds,
                 "active": [e.to_dict() for e in self.active.values()],
@@ -149,7 +163,7 @@ class IncidentManager:
                 "total_notifications": self.total_notifications}
 
     @classmethod
-    def from_dict(cls, data, **callbacks):
+    def from_dict(cls, data: dict[str, Any], **callbacks: Any) -> "IncidentManager":
         obj = cls(data["history_limit"], data["notification_interval_seconds"], **callbacks)
         obj.history.extend(HealthEvent(**e) for e in data["history"])
         for item in data["active"]:

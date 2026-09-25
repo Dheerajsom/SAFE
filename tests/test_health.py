@@ -319,6 +319,22 @@ def test_pm_step_against_reference_is_flagged_despite_scatter():
     assert categories and set(categories) <= {"gradual_degradation", "abrupt_shift"}
 
 
+def test_stuck_sensor_raises_freeze_only_not_a_duplicate_shift_or_drift():
+    notices = []
+    engine = engine_for(on_notification=notices.append)
+    rng = np.random.default_rng(8)
+    warm(engine)
+    # Learn the reference relationship, then the sensor sticks while the
+    # reference climbs 3 C, then it recovers and tracks the reference again.
+    reference = 20 + np.concatenate([np.zeros(100), np.linspace(0, 3, 120), np.full(180, 3)])
+    reference = reference + rng.normal(0, .1, reference.size)
+    sensor = reference + 0.3 + rng.normal(0, .1, reference.size)
+    sensor[100:220] = 20.3
+    _feed_with_reference(engine, sensor, reference, start=120 * 60)
+    assert [n["category"] for n in notices] == ["sensor_freeze"]
+    assert not any(e["family"] == "change" and e["severity"] != "info" for e in engine.events)
+
+
 def test_reference_drift_state_survives_snapshot_and_old_snapshots_load():
     engine = engine_for()
     warm(engine)
@@ -496,3 +512,68 @@ def test_healthy_pressure_diurnal_and_full_year_temperature_have_no_notification
         feed(annual, [value], start=i * 3600)
     assert annual._states[("s", "temperature")].baseline.ready
     assert annual.incidents.total_notifications == 0
+
+
+def _pm_bins(rng, n, total):
+    """Cumulative IPS7100 bins (pm0_1 ... pm10_0) around a pm10_0 level of `total`."""
+    shares = np.array([.04, .22, .42, .58, .78, .91, 1.0])
+    level = total * (1 + rng.normal(0, .05, (n, 1)))
+    return np.round(np.maximum(level * shares * (1 + rng.normal(0, .03, (n, 7))), 0), 3)
+
+
+def _stuck_zero_run(bins, dead=None, peers=None):
+    """Replay bins at 5-minute cadence for an IPS7100; zero `dead` for the last 36 readings."""
+    engine = SensorHealth(sensors={"s": {"model": "IPS7100"}})
+    metrics = ("pm0_1", "pm0_3", "pm0_5", "pm1_0", "pm2_5", "pm5_0", "pm10_0")
+    for index, row in enumerate(bins):
+        reading = dict(zip(metrics, row))
+        if dead is not None and index >= len(bins) - 36:
+            reading[dead] = 0.0
+        refs = None
+        if peers is not None:
+            refs = {m: [{"sensor": f"p{k}", "timestamp": index * 300, "value": peers[m]} for k in (1, 2)]
+                    for m in metrics}
+        engine.data_processing("s", {"unix_timestamp": index * 300, **reading}, references=refs)
+    return [e for e in engine.events if e["category"] == "sensor_freeze"]
+
+
+def test_dead_pm_channel_at_zero_is_stuck_when_a_smaller_bin_reads_high():
+    freezes = _stuck_zero_run(_pm_bins(np.random.default_rng(1), 150, 20), dead="pm2_5")
+    assert [e["metric"] for e in freezes] == ["pm2_5"]
+    evidence = freezes[0]["evidence"]["sensor_freeze"]
+    assert evidence["stuck_at_zero"] and "smaller_bin" in evidence["contradiction_evidence"]
+
+
+def test_smallest_bin_dead_at_zero_is_stuck_from_its_learned_share_of_the_next_bin():
+    # pm0_1 has no smaller bin; its usual share of pm0_3 predicts about 4 ug/m3.
+    freezes = _stuck_zero_run(_pm_bins(np.random.default_rng(2), 150, 100), dead="pm0_1")
+    assert [e["metric"] for e in freezes] == ["pm0_1"]
+    assert "larger_bin_share" in freezes[0]["evidence"]["sensor_freeze"]["contradiction_evidence"]
+
+
+def test_clean_air_zeros_are_not_stuck():
+    rng = np.random.default_rng(3)
+    # Hours of genuinely clean air: every bin near zero, small bins exactly zero.
+    bins = np.vstack([_pm_bins(rng, 100, 20), _pm_bins(rng, 60, 0.3)])
+    bins[100:, :2] = 0.0
+    assert _stuck_zero_run(bins) == []
+    # Clean neighbors agree with a zero reading, so it is not contradicted either.
+    single = SensorHealth()
+    for index, value in enumerate(np.r_[rng.uniform(5, 15, 100), np.zeros(40)]):
+        single.data_processing("s", {"unix_timestamp": index * 300, "pm2_5": value},
+                               references={"pm2_5": [{"sensor": f"p{k}", "timestamp": index * 300,
+                                                      "value": 0.4} for k in (1, 2)]})
+    assert not any(e["category"] == "sensor_freeze" for e in single.events)
+
+
+def test_zero_contradicted_by_neighbors_is_stuck():
+    rng = np.random.default_rng(4)
+    engine = SensorHealth()
+    for index, value in enumerate(np.r_[rng.uniform(5, 15, 100), np.zeros(36)]):
+        engine.data_processing("s", {"unix_timestamp": index * 300, "pm2_5": value},
+                               references={"pm2_5": [{"sensor": f"p{k}", "timestamp": index * 300,
+                                                      "value": 9.0} for k in (1, 2)]})
+    freezes = [e for e in engine.events if e["category"] == "sensor_freeze"]
+    assert len(freezes) == 1
+    assert "reference" in freezes[0]["evidence"]["sensor_freeze"]["contradiction_evidence"]
+    assert not any(e["family"] == "change" and e["severity"] != "info" for e in engine.events)

@@ -21,6 +21,8 @@ from safe.stats import sample_comparison
 
 STATE_SCHEMA_VERSION = 1
 ENGINE_VERSION = "3.0.0"
+# Fraction of a zero run's readings that must contradict clean air for a freeze.
+STUCK_ZERO_SUPPORT = 0.8
 
 
 def utc_seconds(value):
@@ -113,6 +115,8 @@ class _HealthState:
         self.freeze_anchor = None
         self.freeze_started = None
         self.freeze_count = 0
+        self.zero_contradictions = 0
+        self.bin_shares = deque(maxlen=profile.max_samples)  # value / next larger cumulative bin
         self.has_variability = False
         self.run_sign = 0
         self.run_count = 0
@@ -160,7 +164,7 @@ class _HealthState:
                 obj.ph = PageHinkley(value["delta"], value["lam"])
                 vars(obj.ph).update(value)
             elif key in {"warmup", "residuals", "reference_levels", "arrivals", "recent_anomalies",
-                         "peer_samples"}:
+                         "peer_samples", "bin_shares"}:
                 if len(value) > obj.profile.max_samples:
                     raise ValueError("state history exceeds configured bound")
                 setattr(obj, key, deque(value, maxlen=obj.profile.max_samples))
@@ -310,9 +314,13 @@ class SensorHealth:
         # Explicit tick calls are still needed to detect a sensor that never resumes.
         if arrival is None and (self._clock is None or t > self._clock):
             self.tick(t)
+        ordered = [m for m in rule.ordered_metrics if m in values and math.isfinite(values[m])]
+        bins = {m: dict(smaller_max=max((values[s] for s in ordered[:i]), default=None),
+                        larger=values[ordered[i + 1]] if i + 1 < len(ordered) else None)
+                for i, m in enumerate(ordered)}
         for metric, value in values.items():
             self._process(sensor_name, metric, value, t, rule_findings.get(metric, []),
-                          (references or {}).get(metric))
+                          (references or {}).get(metric), bins.get(metric))
 
     def _plausibility(self, values, rule):
         findings = {}
@@ -347,7 +355,25 @@ class SensorHealth:
             return float(np.median(trusted))
         return float(np.median(list(valid.values()))) if len(valid) >= 2 else None
 
-    def _process(self, sensor, metric, value, t, findings, references):
+    def _zero_contradictions(self, state, value, peer, bins):
+        """Evidence that a zero reading is not clean air, as {source: predicted value}."""
+        p = state.profile
+        level = p.stuck_zero_min_expected
+        if not level or value > p.freeze_tolerance:
+            return {}
+        evidence = {}
+        if peer is not None and peer >= level:
+            evidence["reference"] = peer
+        if bins and bins["smaller_max"] is not None and bins["smaller_max"] >= level:
+            # Cumulative bins: this bin can never read below a smaller one.
+            evidence["smaller_bin"] = bins["smaller_max"]
+        if bins and bins["larger"] is not None and len(state.bin_shares) >= p.minimum_samples:
+            predicted = float(np.median(state.bin_shares)) * bins["larger"]
+            if predicted >= level:
+                evidence["larger_bin_share"] = predicted
+        return evidence
+
+    def _process(self, sensor, metric, value, t, findings, references, bins=None):
         state = self._states[(sensor, metric)]
         p = state.profile
         if state.last_at is not None and t <= state.last_at:
@@ -416,24 +442,36 @@ class SensorHealth:
             state.mode = "INCIDENT"
             return
         state.invalid_run = 0
+        peer = self._peer(sensor, p, t, references)
         if state.freeze_started is None or abs(value - state.freeze_anchor) > p.freeze_tolerance:
             if state.freeze_anchor is not None and abs(value - state.freeze_anchor) > 4 * p.freeze_tolerance:
                 state.has_variability = True
             state.freeze_anchor = value
             state.freeze_started = t
             state.freeze_count = 1
+            state.zero_contradictions = 0
         else:
             state.freeze_count += 1
+        contradictions = self._zero_contradictions(state, value, peer, bins)
+        state.zero_contradictions += bool(contradictions)
+        # Clean air legitimately holds PM and particle-count bins at zero for hours;
+        # a zero run is stuck only when most of it contradicts clean air.
+        zero = (metric in PM_METRICS or metric in PC_METRICS) and value <= p.freeze_tolerance
+        stuck_zero = zero and state.zero_contradictions >= STUCK_ZERO_SUPPORT * state.freeze_count
         if (state.freeze_count >= p.freeze_min_readings and t - state.freeze_started >= p.freeze_duration_seconds
-                and (p.freeze_at_startup or state.has_variability)
-                # Clean air legitimately holds PM and particle-count bins at zero for hours.
-                and not ((metric in PM_METRICS or metric in PC_METRICS) and value <= p.freeze_tolerance)):
+                and (p.freeze_at_startup or state.has_variability) and (not zero or stuck_zero)):
             seen.add("freeze")
+            extra = dict(stuck_at_zero=True, contradicted_readings=state.zero_contradictions,
+                         contradiction_evidence=contradictions) if zero else {}
             self._observe(sensor, metric, "sensor_freeze", "freeze", t, confidence=0.95,
                           run_length=state.freeze_count, duration_seconds=t - state.freeze_started,
-                          tolerance=p.freeze_tolerance, value=value)
+                          tolerance=p.freeze_tolerance, value=value, **extra)
+        if (bins and bins["larger"] is not None and p.stuck_zero_min_expected
+                and bins["larger"] >= p.stuck_zero_min_expected and value > p.freeze_tolerance
+                and not ({"freeze", "plausibility"} & seen)):
+            # Learn only from nonzero readings so a dead channel cannot teach a zero share.
+            state.bin_shares.append(value / bins["larger"])
         state.last_value = value
-        peer = self._peer(sensor, p, t, references)
         if not state.baseline.ready:
             if peer is not None and not ({"freeze", "plausibility"} & seen):
                 state.peer_samples.append(_peer_sample(p, value, peer))
@@ -511,6 +549,30 @@ class SensorHealth:
                 # constant percentage, so the residual scale grows with the level.
                 # The ambient scale, learned mostly at lower levels, stays the floor.
                 scale = max(scale, state.peer_spread * (expected + p.reference_ratio_floor))
+        # A contradicted zero run is a pending stuck-at-zero: hold shift/drift until
+        # the freeze check confirms it (or the run breaks) instead of misdiagnosing.
+        # Skip the reading without discarding evidence gathered before the run.
+        frozen = "freeze" in seen or (sensor, metric, "freeze") in self.incidents.active
+        if (not frozen and p.stuck_zero_min_expected and value <= p.freeze_tolerance
+                and state.freeze_count >= 2
+                and state.zero_contradictions >= STUCK_ZERO_SUPPORT * state.freeze_count):
+            return
+        if frozen:
+            # A stuck value disagrees with the ambient model and any reference, but
+            # that is the freeze incident's evidence, not a second shift or drift.
+            # Drop the stuck readings gathered before the freeze was confirmed so
+            # they cannot raise drift once the sensor recovers.
+            if "freeze" in seen and state.freeze_started is not None:
+                for history in (state.residuals, state.reference_levels, state.recent_anomalies):
+                    while history and history[-1][0] >= state.freeze_started:
+                        history.pop()
+            state.run_count = state.run_sign = 0
+            state.ph.reset()
+            state.mean_confirmations = state.variance_confirmations = 0
+            state.window_category, state.window_evidence = None, {}
+            state.reference_drift_confirmations = 0
+            state.reference_drift_evidence = None
+            return
         residual = value - expected
         z = residual / scale
         anomalous = abs(z) >= p.outlier_threshold and abs(residual) >= p.step_min_effect

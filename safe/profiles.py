@@ -37,6 +37,11 @@ class MetricProfile:
     freeze_duration_seconds: float = 3600
     freeze_min_readings: int = 12
     freeze_at_startup: bool = True
+    # PM bins may legitimately read zero in clean air, so a zero run is only a
+    # freeze when evidence says the air is not clean: a smaller cumulative bin, the
+    # learned share of the next larger bin, or the reference predicts at least this
+    # much. 0 never treats a zero run as stuck.
+    stuck_zero_min_expected: float = 0
     gap_factor: float = 3
     completeness_window_seconds: float = 86400
     minimum_completeness: float = 0.8
@@ -59,7 +64,7 @@ class MetricProfile:
                          "persistence_evaluations", "max_samples"}
         boolean_names = {"freeze_at_startup", "enable_page_hinkley", "stationary_residuals"}
         nonnegative = {"freeze_tolerance", "seasonal_rate_per_day", "reference_ratio_floor",
-                       "reference_drift_relative_tolerance"}
+                       "reference_drift_relative_tolerance", "stuck_zero_min_expected"}
         for f in fields(self):
             value = getattr(self, f.name)
             if f.name == "hard_bounds":
@@ -114,6 +119,8 @@ def metric_profile(metric, deployment="outdoor", expected_interval_seconds=300):
                        freeze_at_startup=False, freeze_tolerance=0,
                        seasonal_rate_per_day=10, reference_drift_tolerance=2,
                        reference_ratio_floor=1, reference_drift_relative_tolerance=0.15)
+        if metric in PM_METRICS:
+            options.update(stuck_zero_min_expected=2)
     elif metric == "shuntVoltage":
         options.update(residual_scale_floor=0.001, step_min_effect=0.005,
                        freeze_tolerance=0.000001, seasonal_rate_per_day=0.001,

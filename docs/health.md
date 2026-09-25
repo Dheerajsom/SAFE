@@ -98,6 +98,10 @@ An incident aggregates related detectors by sensor, metric, and symptom family.
 An anomaly followed by a persistent step retains its ID and becomes more severe.
 Validity, availability, freeze, timestamp, and plausibility have separate families
 so a new independent data-quality problem is not hidden by an old change incident.
+While a freeze incident is active on a series, its change detectors (steps, noise,
+window tests, reference drift) are suspended and the stuck readings are dropped from
+their history: a frozen value disagreeing with the ambient model or a reference is
+the freeze's evidence, not a second shift or drift diagnosis.
 Cross-metric restart evidence lists all jumping fields but does not assert that
 they share a proven hardware cause. Confidence is a bounded evidence-strength
 heuristic, **not** a calibrated probability of failure.
@@ -108,7 +112,14 @@ robust gate rejects gross startup contamination and repeated contamination resta
 the provisional sample. Daily environmental modeling waits for sufficient phase
 coverage. An unknown stable offset present throughout startup cannot be identified
 without a reference. PM and particle-count zeros are allowed; freeze rules do not
-call stable clean-air zero values a failure. Customize tolerances to the instrument's quantization.
+call stable clean-air zero values a failure. A PM bin's zero run is a freeze (with
+`stuck_at_zero` evidence) only when at least 80% of its readings contradict clean air:
+a smaller cumulative bin, the bin's learned share of the next larger bin (learned from
+nonzero readings only), or the reference reads at least `stuck_zero_min_expected`
+(2 µg/m³ by default). Shift and drift checks wait on such a run until the freeze
+check decides. A whole sensor reading zero with no reference has no contradicting
+evidence and is indistinguishable from clean air. Customize tolerances to the
+instrument's quantization.
 
 The expected signal is a robust UTC phase profile, interpolated between bins, with
 a rate-limited seasonal level. Each phase retains a bounded number of cycle

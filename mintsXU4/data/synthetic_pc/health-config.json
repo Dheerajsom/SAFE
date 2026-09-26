@@ -1,0 +1,32 @@
+{
+  "profiles": {
+    "deployment": "outdoor",
+    "expected_interval_seconds": 300
+  },
+  "sensors": {
+    "IPS7100SYN_node01": {
+      "model": "IPS7100",
+      "site": "synthetic-colocation"
+    },
+    "IPS7100SYN_node02": {
+      "model": "IPS7100",
+      "site": "synthetic-colocation"
+    },
+    "IPS7100SYN_node03": {
+      "model": "IPS7100",
+      "site": "synthetic-colocation"
+    },
+    "IPS7100SYN_node04": {
+      "model": "IPS7100",
+      "site": "synthetic-colocation"
+    },
+    "IPS7100SYN_node05": {
+      "model": "IPS7100",
+      "site": "synthetic-colocation"
+    },
+    "IPS7100SYN_node06": {
+      "model": "IPS7100",
+      "site": "synthetic-colocation"
+    }
+  }
+}

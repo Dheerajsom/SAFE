@@ -16,7 +16,9 @@ def short_profile(**changes):
                    warmup_duration_seconds=3600, seasonal_period_seconds=3600,
                    seasonal_bins=12, minimum_samples=30, window_seconds=3600,
                    completeness_window_seconds=3600, evaluation_interval_seconds=600,
-                   recovery_seconds=180, freeze_duration_seconds=600, **changes)
+                   recovery_seconds=180, freeze_duration_seconds=600,
+                   # Time is compressed here, so the wall-clock gap floors are too.
+                   **{"min_gap_seconds": 180, "reset_gap_seconds": 180, **changes})
 
 
 def engine_for(profile=None, **kwargs):
@@ -577,3 +579,116 @@ def test_zero_contradicted_by_neighbors_is_stuck():
     assert len(freezes) == 1
     assert "reference" in freezes[0]["evidence"]["sensor_freeze"]["contradiction_evidence"]
     assert not any(e["family"] == "change" and e["severity"] != "info" for e in engine.events)
+
+
+# ---------------------------------------------------------------------------
+# 1-second cadence and particle-count channels
+# ---------------------------------------------------------------------------
+
+def _one_second_engine(metric, notices=None, **changes):
+    """A 1 s profile for `metric` with a one-hour season so warmup fits in a test."""
+    profile = replace(metric_profile(metric, expected_interval_seconds=1), warmup_duration_seconds=3600,
+                      seasonal_period_seconds=3600, seasonal_bins=12, window_seconds=3600,
+                      completeness_window_seconds=3600, evaluation_interval_seconds=600, **changes)
+    return SensorHealth(profiles=ProfileRegistry(expected_interval_seconds=1, overrides=[
+        dict(match={"metric": metric}, profile=profile.to_dict())]),
+        on_notification=(notices.append if notices is not None else None))
+
+
+def test_short_gaps_at_one_second_are_not_outages_and_keep_detector_state():
+    engine = _one_second_engine("pm2_5")
+    stamps = list(range(0, 100)) + list(range(104, 200)) + list(range(205, 300))  # 4 s and 5 s gaps
+    for t in stamps:
+        engine.data_processing("s", {"unix_timestamp": t, "pm2_5": 7.0})
+    state = engine._states[("s", "pm2_5")]
+    assert not any(e["category"] == "missing_data" for e in engine.events)
+    assert state.freeze_count == len(stamps)  # the constant run spans both short gaps
+    for t in range(300 + 900, 1300):  # a 15-minute outage
+        engine.data_processing("s", {"unix_timestamp": t, "pm2_5": 7.0})
+    outages = [e for e in engine.events if e["category"] == "missing_data"]
+    assert len(outages) == 1 and outages[0]["severity"] == "warning"
+    assert state.freeze_count == 1300 - 1200  # detector state restarted after the outage
+
+
+def test_gap_thresholds_are_unchanged_at_the_five_minute_cadence():
+    profile = metric_profile("pm2_5")
+    assert profile.gap_alert_seconds() == profile.gap_reset_seconds() == 3 * 300
+
+
+def test_poisson_noise_on_a_sparse_count_channel_is_not_a_change():
+    notices = []
+    engine = _one_second_engine("pc5_0", notices)
+    counts = np.random.default_rng(21).poisson(2.0, 5 * 3600)
+    for t, value in enumerate(counts):
+        engine.data_processing("s", {"unix_timestamp": t, "pc5_0": float(value)})
+    assert engine._states[("s", "pc5_0")].baseline.ready
+    assert not any(e["category"] in ("abrupt_shift", "uncertain_change") for e in engine.events)
+    assert not notices
+
+
+def test_counting_noise_sets_the_residual_yardstick_for_sparse_counts():
+    # The field case: expected 1.9/L, seen 8. With the old floor of 1 that was a
+    # six-sigma residual; counting noise alone has sd sqrt(1.9) at 1 s.
+    one_second, five_minute = (metric_profile("pc2_5", expected_interval_seconds=i) for i in (1, 300))
+    assert one_second.scale_floor(1.9) == pytest.approx(math.sqrt(1.9))
+    assert (8 - 1.9) / one_second.scale_floor(1.9) < one_second.outlier_threshold
+    assert (8 - 1.9) / metric_profile("pm2_5").scale_floor(1.9) > one_second.outlier_threshold
+    assert five_minute.scale_floor(14) == five_minute.residual_scale_floor  # 5-min means are precise
+    assert one_second.min_effect(100_000) == 50_000 and one_second.min_effect(2) == 5
+
+
+def test_count_channel_warms_up_through_ambient_drift_at_one_second():
+    engine = _one_second_engine("pc0_1")
+    rng = np.random.default_rng(22)
+    t = np.arange(3 * 3600)
+    level = 1e5 * np.exp(0.6 * np.sin(2 * np.pi * t / 5400))  # air changes by 3x within 45 minutes
+    for stamp, value in zip(t, rng.poisson(level)):
+        engine.data_processing("s", {"unix_timestamp": int(stamp), "pc0_1": float(value)})
+    state = engine._states[("s", "pc0_1")]
+    assert state.baseline.ready and state.warmup_restarts == 0
+
+
+def test_particle_counts_above_one_million_per_liter_are_valid():
+    engine = SensorHealth()
+    for index, value in enumerate([90_000, 400_000, 1_500_000, 1_200_000]):
+        engine.data_processing("s", {"unix_timestamp": index * 300, "pc0_1": value})
+    assert not any(e["category"] == "invalid_measurement" for e in engine.events)
+    engine.data_processing("s", {"unix_timestamp": 1500, "pc0_1": 2e10})  # more mass than PM can hold
+    assert [e["category"] for e in engine.events if e["family"] == "validity"] == ["invalid_measurement"]
+
+
+def _count_episode(references):
+    """Two days of pc0_5 near 10,000/L, then two hours at 4x; optionally a steady trusted reference."""
+    notices = []
+    engine = SensorHealth(on_notification=notices.append)
+    rng = np.random.default_rng(23)
+    values = 10_000 * np.exp(rng.normal(0, 0.1, 600))
+    values[576:] *= 4
+    for index, value in enumerate(values):
+        t = index * 300
+        refs = {"pc0_5": [{"sensor": "ref", "timestamp": t, "value": 10_000.0, "trusted": True}]}
+        engine.data_processing("s", {"unix_timestamp": t, "pc0_5": float(value)},
+                               references=refs if references else None)
+    return engine, notices
+
+
+def test_count_episode_without_reference_is_uncertain_not_a_fault():
+    engine, notices = _count_episode(references=False)
+    assert any(e["category"] == "uncertain_change" and e["severity"] == "info" for e in engine.events)
+    assert not any(n["family"] == "change" for n in notices)
+
+
+def test_count_shift_against_steady_reference_is_still_a_fault():
+    engine, notices = _count_episode(references=True)
+    assert "abrupt_shift" in [n["category"] for n in notices]
+
+
+def test_brief_slow_cadence_at_one_second_is_not_degradation():
+    engine = _one_second_engine("pm2_5")
+    stamps = list(range(0, 600)) + list(range(600, 624, 2)) + list(range(624, 900))  # 24 s at 2 s spacing
+    for t in stamps:
+        engine.data_processing("s", {"unix_timestamp": t, "pm2_5": 7.0 + t % 3})
+    assert not any(e["category"] == "cadence_degradation" for e in engine.events)
+    for t in range(900, 900 + 1200, 2):  # twenty minutes at half the expected rate
+        engine.data_processing("s", {"unix_timestamp": t, "pm2_5": 7.0 + t % 3})
+    assert any(e["category"] == "cadence_degradation" for e in engine.events)

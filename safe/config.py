@@ -7,7 +7,7 @@
 
 # Health engine release. Detection changes must bump it: saved states refuse
 # to load across versions, and every incident records the version it came from.
-ENGINE_VERSION = "3.0.0"
+ENGINE_VERSION = "3.1.0"
 
 # Cleaner display names for known measurements
 SENSOR_DISPLAY_NAMES = {
@@ -18,11 +18,25 @@ SENSOR_DISPLAY_NAMES = {
 PM_BOUNDS = (0.0, 10000.0)
 PM_METRICS = ('pm0_1', 'pm0_3', 'pm0_5', 'pm1_0', 'pm2_5', 'pm5_0', 'pm10_0')
 
-# IPS7100 differential particle-count bins.  The deployed sensor's count
-# output is particles/liter (the IPS protocol's default unit), with a stated
-# measurement limit of 1,000,000 particles/liter.
-PC_BOUNDS = (0.0, 1_000_000.0)
+# IPS7100 differential particle-count bins, in particles/liter.
 PC_METRICS = ('pc0_1', 'pc0_3', 'pc0_5', 'pc1_0', 'pc2_5', 'pc5_0', 'pc10_0')
+
+# The IPS7100 reports each PM bin as the running sum of count bins times a fixed
+# mass per particle (ug/m3 per particle/L). Recovered from the valo_node_01 1 s
+# export: PM matches the counts to within 0.5 % for the four smallest bins.
+IPS7100_MASS_PER_COUNT = (8.3557e-07, 2.2560e-05, 1.0445e-04, 8.3642e-04, 1.3691e-02, 1.8456e-01, 2.5115e+00)
+
+# A count bin is physically impossible once its mass alone would exceed the PM
+# hard bound. The old flat 1,000,000/L limit was exceeded by real pc0_1 readings
+# (up to 1.2M/L at 1 s) while PM2.5 read only 37-110 ug/m3. pc0_1's bound is also the
+# display fallback for unconfigured count fields.
+PC_HARD_BOUNDS = {pc: (0.0, float(f"{PM_BOUNDS[1] / mass:.3g}"))
+                  for pc, mass in zip(PC_METRICS, IPS7100_MASS_PER_COUNT)}
+PC_BOUNDS = PC_HARD_BOUNDS['pc0_1']
+
+# At 1 s the IPS7100 reports whole particle counts per liter, so counting noise on
+# a value averaged over T seconds has variance of about expected / T.
+PC_LITERS_PER_SECOND = 1.0
 
 # Hard physical bounds per metric. Values outside these are impossible for the
 # instrument and are treated as failures, never as data.
@@ -32,7 +46,7 @@ HARD_BOUNDS = {
     'pressure':     (300.0, 1200.0),   # hPa
     'shuntVoltage': (-0.320, 0.320),   # INA219 max shunt voltage range (V)
     **{pm: PM_BOUNDS for pm in PM_METRICS},
-    **{pc: PC_BOUNDS for pc in PC_METRICS},
+    **PC_HARD_BOUNDS,
 }
 
 # Device associated with the historical short display name.
@@ -83,7 +97,8 @@ STUCK_ZERO_MIN_RUN = 2
 VARIABILITY_TOLERANCE_FACTOR = 4
 
 # Cadence: median of the last CADENCE_HISTORY intervals, once CADENCE_MIN_INTERVALS
-# exist, degrades when it exceeds CADENCE_DEGRADATION_FACTOR x the expected interval.
+# exist, degrades when it exceeds CADENCE_DEGRADATION_FACTOR x the expected interval
+# and the slow cadence plus that history spans the profile's min_gap_seconds.
 CADENCE_HISTORY = 12
 CADENCE_MIN_INTERVALS = 11
 CADENCE_DEGRADATION_FACTOR = 1.5
@@ -94,8 +109,12 @@ INVALID_RUN_RESTART = 3
 # Provisional warmup gate: once PROVISIONAL_MIN_SAMPLES exist, a reading further
 # than max(PROVISIONAL_OUTLIER_SCALES x robust scale, PROVISIONAL_OUTLIER_STEPS x
 # step_min_effect) from the last PROVISIONAL_WINDOW warmup values is contamination.
+# The window spans PROVISIONAL_WINDOW_SECONDS (24 readings at the 300 s cadence),
+# sampled down to PROVISIONAL_WINDOW values at faster cadences: 24 readings at 1 s
+# is only 24 s of history, too short to know how much ambient air moves.
 PROVISIONAL_MIN_SAMPLES = 8
 PROVISIONAL_WINDOW = 24
+PROVISIONAL_WINDOW_SECONDS = 7200
 PROVISIONAL_OUTLIER_SCALES = 12
 PROVISIONAL_OUTLIER_STEPS = 4
 

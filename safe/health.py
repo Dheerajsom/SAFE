@@ -40,6 +40,7 @@ from safe.config import (
     PROVISIONAL_OUTLIER_SCALES,
     PROVISIONAL_OUTLIER_STEPS,
     PROVISIONAL_WINDOW,
+    PROVISIONAL_WINDOW_SECONDS,
     STUCK_ZERO_MIN_RUN,
     STUCK_ZERO_SUPPORT,
     VARIABILITY_TOLERANCE_FACTOR,
@@ -58,6 +59,9 @@ UNTRUSTED_FAMILIES = frozenset({"freeze", "plausibility"})
 ROUTINE_FAMILIES = frozenset({"validity", "availability", "timestamp", "plausibility",
                               "freeze", "startup", "environment"})
 _DEFAULT_RULES = SensorRules()
+# Particle mass and count bins move with the air: without a reference, a
+# persistent change may be ambient rather than a sensor fault.
+AMBIENT_METRICS = frozenset(PM_METRICS) | frozenset(PC_METRICS)
 
 Findings = list[tuple[str, dict[str, Any]]]
 BinContext = dict[str, float | None]
@@ -227,6 +231,7 @@ class _HealthState:
         self.arrivals = _CountedDeque(lambda stamp: int((stamp - self.first_at) // interval),
                                       maxlen=bound)  # first arrival per cadence slot
         self.cadences = deque(maxlen=CADENCE_HISTORY)
+        self.cadence_slow_since: float | None = None
         self.first_at: float | None = None
         self.last_at: float | None = None
         self.last_value: float | None = None
@@ -406,7 +411,7 @@ class SensorHealth:
             if anchor is None:
                 continue
             p = state.profile
-            if t - anchor >= p.expected_interval_seconds * p.gap_factor:
+            if t - anchor >= p.gap_alert_seconds():
                 self._observe(sensor, metric, "missing_data", "availability", t,
                               confidence=CONFIDENCE_OBSERVED, last_reading_at=state.last_at,
                               silence_seconds=t - anchor, expected_interval=p.expected_interval_seconds)
@@ -471,7 +476,7 @@ class SensorHealth:
         for metric, value in values.items():
             state = self.register(sensor, metric)
             if (state.last_value is not None and math.isfinite(value)
-                    and abs(value - state.last_value) >= state.profile.step_min_effect):
+                    and abs(value - state.last_value) >= state.profile.min_effect(state.last_value)):
                 jumps.append(metric)
         if len(jumps) >= rule.simultaneous_jump_metrics:
             for metric in jumps:
@@ -574,7 +579,7 @@ class SensorHealth:
                           "timestamp", max(t, state.last_at), confidence=CONFIDENCE_OBSERVED,
                           rejected_timestamp=t)
             return True
-        if self._clock is not None and self._clock - t >= p.gap_factor * p.expected_interval_seconds:
+        if self._clock is not None and self._clock - t >= p.gap_alert_seconds():
             self._observe(sensor, metric, "delayed_data", "availability", self._clock,
                           confidence=CONFIDENCE_OBSERVED, rejected_timestamp=t, delay_seconds=self._clock - t)
             return True
@@ -596,8 +601,9 @@ class SensorHealth:
             state.cadences.append(t - previous)
         while state.arrivals and t - state.arrivals[0] > p.completeness_window_seconds:
             state.arrivals.popleft()
-        if previous is not None and t - previous >= interval * p.gap_factor:
+        if previous is not None and t - previous >= p.gap_alert_seconds():
             seen.add("availability")
+        if previous is not None and t - previous >= p.gap_reset_seconds():
             state.freeze_count = 0
             state.freeze_started = None
             state.run_count = 0
@@ -618,7 +624,15 @@ class SensorHealth:
                               completeness=completeness, expected_slots=expected, occupied_slots=occupied)
         if len(state.cadences) >= CADENCE_MIN_INTERVALS:
             cadence = median(state.cadences)
-            if cadence > CADENCE_DEGRADATION_FACTOR * interval:
+            slow = cadence > CADENCE_DEGRADATION_FACTOR * interval
+            if not slow:
+                state.cadence_slow_since = None
+            elif state.cadence_slow_since is None:
+                state.cadence_slow_since = t
+            # The evidence must span min_gap_seconds of wall-clock time: at 1 s, twelve
+            # intervals are a 20-second blip; at 300 s they already cover an hour.
+            wait = p.min_gap_seconds - CADENCE_HISTORY * interval
+            if slow and t - state.cadence_slow_since >= wait:
                 seen.add("availability")
                 self._observe(sensor, metric, "cadence_degradation", "availability", t,
                               observed_interval=cadence, expected_interval=interval)
@@ -728,10 +742,17 @@ class SensorHealth:
         p = state.profile
         if len(state.warmup) < PROVISIONAL_MIN_SAMPLES:
             return False
-        recent = [state.warmup[i][1] for i in range(-min(PROVISIONAL_WINDOW, len(state.warmup)), 0)]
+        span = min(len(state.warmup), max(PROVISIONAL_WINDOW,
+                                          round(PROVISIONAL_WINDOW_SECONDS / p.expected_interval_seconds)))
+        if span <= PROVISIONAL_WINDOW:
+            recent = [state.warmup[i][1] for i in range(-span, 0)]
+        else:  # evenly spaced samples of the span; deque indexing near the end is cheap
+            recent = [state.warmup[i][1] for i in
+                      sorted({int(round(i)) for i in np.linspace(-span, -1, PROVISIONAL_WINDOW)})]
         center, scale = robust_scale(recent, p.residual_scale_floor)
+        scale = max(scale, p.scale_floor(center))
         if abs(value - center) <= max(PROVISIONAL_OUTLIER_SCALES * scale,
-                                      PROVISIONAL_OUTLIER_STEPS * p.step_min_effect):
+                                      PROVISIONAL_OUTLIER_STEPS * p.min_effect(center)):
             return False
         state.startup_run += 1
         seen.add("startup")
@@ -761,13 +782,14 @@ class SensorHealth:
                 scale = max(scale, state.peer_spread * (expected + p.reference_ratio_floor))
         if self._held_for_freeze(sensor, metric, state, value, seen):
             return
+        scale = max(scale, p.scale_floor(expected))
         residual = value - expected
         z = residual / scale
         r = _Residual(value, t, expected, scale, residual, z,
-                      anomalous=abs(z) >= p.outlier_threshold and abs(residual) >= p.step_min_effect,
-                      environmental=metric in PM_METRICS and peer is None, peer=peer)
-        if peer is not None and metric in PM_METRICS and not r.anomalous:
-            if abs(value - ambient_expected) >= p.step_min_effect:
+                      anomalous=abs(z) >= p.outlier_threshold and abs(residual) >= p.min_effect(expected),
+                      environmental=metric in AMBIENT_METRICS and peer is None, peer=peer)
+        if peer is not None and metric in AMBIENT_METRICS and not r.anomalous:
+            if abs(value - ambient_expected) >= p.min_effect(ambient_expected):
                 seen.add("environment")
                 self._observe(sensor, metric, "environmental_event", "environment", t, "info",
                               CONFIDENCE_STATISTICAL, value=value, peer_consensus=peer, residual=residual)
@@ -808,7 +830,7 @@ class SensorHealth:
                 if p.reference_ratio_floor:
                     state.peer_spread = robust_scale(list(state.peer_samples), 0.0)[1]
                 state.peer_samples.clear()
-            elif abs(value - expected) < p.step_min_effect:
+            elif abs(value - expected) < p.min_effect(expected):
                 state.peer_samples.append(_peer_sample(p, value, peer))
             if state.peer_offset is None:
                 peer = None  # no peer diagnosis until target/reference offset is learned
@@ -924,7 +946,13 @@ class SensorHealth:
         # the underlying AR(1) approximation does not establish field calibration.
         alpha = p.family_alpha / (2 * state.evaluations * (state.evaluations + 1))
         result = sample_comparison(old, new, alpha, metric, autocorr_correction=True)
-        mean = result["mean_shift"] and abs(result["mean_delta"]) >= p.step_min_effect
+        level = 0.0
+        if p.step_min_relative:  # typical expected level over the window
+            level = state.baseline.predict(t)[0]
+            if state.peer_mode:
+                recent = [v for stamp, v in state.reference_levels if stamp > t - p.window_seconds]
+                level = float(np.median(recent)) if recent else level
+        mean = result["mean_shift"] and abs(result["mean_delta"]) >= p.min_effect(level)
         variance = result["variance_shift"] and (result["std_ratio"] >= NOISE_STD_RATIO
                                                  or result["std_ratio"] <= 1 / NOISE_STD_RATIO)
         state.mean_confirmations = state.mean_confirmations + 1 if mean else 0

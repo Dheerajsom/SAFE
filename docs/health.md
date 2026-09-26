@@ -82,8 +82,8 @@ transaction. No callbacks, credentials, or executable objects are serialized.
 |---|---|
 | Invalid/nonfinite/out-of-bounds value | Immediate critical data-quality incident; baseline excludes it |
 | Duplicate, backward, future timestamp | Timestamp evidence; quarantines the measurement |
-| Silence or excessive gaps | Clock-driven availability incident |
-| Slower cadence or missing slots | Median interval and elapsed-time completeness evidence |
+| Silence or excessive gaps | Clock-driven availability incident once silent for `gap_factor` intervals and at least `min_gap_seconds` (600 s) |
+| Slower cadence or missing slots | Median interval (sustained over at least `min_gap_seconds`) and elapsed-time completeness evidence |
 | Repeated/nearly identical readings | Time- and run-length freeze detector, including startup |
 | Large isolated residual | Informational anomaly, correlated with subsequent change evidence |
 | Persistent residual offset | Warning after the configured consecutive-reading requirement |
@@ -91,8 +91,8 @@ transaction. No callbacks, credentials, or executable objects are serialized.
 | Repeated mean/variance tests | Effect gates, AR(1) correction, persistence, and per-series alpha spending |
 | PM-bin ordering/status/dewpoint rules | Opt-in model-specific plausibility evidence |
 | Simultaneous jumps | Possible restart evidence; cause remains uncertain |
-| Shared PM movement with calibrated peers | Informational environmental event |
-| PM movement without peers | Informational uncertain change; inspect neighboring/reference data |
+| Shared PM or particle-count movement with calibrated peers | Informational environmental event |
+| PM or particle-count movement without peers | Informational uncertain change; inspect neighboring/reference data |
 
 An incident aggregates related detectors by sensor, metric, and symptom family.
 An anomaly followed by a persistent step retains its ID and becomes more severe.
@@ -147,6 +147,24 @@ target outdoor MINTS at 300-second intervals, with a 24-hour warm-up. Metric-spe
 scales, effects, freeze rules, and physical limits differ for temperature, pressure,
 humidity, voltage, PM, and particle counts. Override known deployments rather than
 assuming these candidate defaults are calibrated for every sensor.
+
+Gaps are judged in wall-clock time. A silence is missing data once it lasts
+`gap_factor` intervals and at least `min_gap_seconds` (600 s); detector state
+(freeze runs, step runs, residual and reference histories) is only discarded
+after `reset_gap_seconds` (900 s). At the 300-second cadence both equal
+`gap_factor` x interval, as before; at 1 second a few missing readings are
+neither an outage nor a reason to forget the signal. The provisional warm-up gate
+likewise looks back over two hours of readings at any cadence.
+
+Particle-count bins span five orders of magnitude, so their effects are also
+relative: a change must reach `step_min_relative` (50%) of the expected level as
+well as `step_min_effect`. Their residual scale is at least the counting noise
+`sqrt(expected / count_liters)`; at 1 second the IPS7100 reports whole counts per
+liter, so `count_liters` is the averaging time in seconds (1 at 1 s, 300 at 5 min).
+Count hard bounds follow the IPS7100's own PM derivation: a bin is invalid once
+its count alone implies more mass than the PM bound (10,000 µg/m³), e.g.
+1.2e10/L for pc0_1 and 3,980/L for pc10_0. The former flat 1,000,000/L limit was
+exceeded by real pc0_1 readings (up to 1.2M/L) while PM2.5 read only 37-110 µg/m³.
 
 ```python
 from dataclasses import replace
@@ -231,8 +249,13 @@ deployment-specific thresholds.
 
 ## Upgrade and operational limits
 
-Install with `pip install -e ".[dev]"`. The package and engine version is 3.0.0;
-health checkpoint schema is 1. Engine 3.0.0 compares PM and particle-count bins with
+Install with `pip install -e ".[dev]"`. The package and engine version is 3.1.0;
+health checkpoint schema is 1. Engine 3.1.0 judges gaps in wall-clock time
+(`min_gap_seconds`, `reset_gap_seconds`), gives particle counts relative effects,
+a counting-noise floor, and mass-derived hard bounds, and treats unreferenced
+particle-count changes as possibly ambient like PM; results at the 300-second
+cadence are unchanged except for particle counts. Engine 3.0.0 checkpoints are
+rejected; start a new engine. Engine 3.0.0 compared PM and particle-count bins with
 a reference by ratio rather than difference (profile `reference_ratio_floor`) and
 requires reference drift to exceed both `reference_drift_tolerance` and
 `reference_drift_relative_tolerance` times the reference-predicted level, so a

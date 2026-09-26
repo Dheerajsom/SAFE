@@ -11,8 +11,9 @@ single streaming engine (SAFE 3 removed the per-reading `SensorDrift` engine).
 
 The core lives in the `safe` package at the repo root; `mintsXU4/` holds thin
 compatibility shims plus older live-sensor utilities. Engine accuracy is tested
-on the seeded synthetic PM dataset in `mintsXU4/data/synthetic_pm/` (one CSV per
-PM bin plus fault labels; see `docs/synthetic-pm.md`). The full-year field export
+on the seeded synthetic datasets in `mintsXU4/data/synthetic_pm/` and
+`mintsXU4/data/synthetic_pc/` (one CSV per PM or PC bin plus fault labels; see
+`docs/synthetic-pm.md`). The full-year field export
 `mintsXU4/data/valo_node_01_full_year.csv` is no longer tracked (removed in
 `40f2c4d`); the entry points below still default to it. Generated outputs live
 under `mintsXU4/output/`.
@@ -36,8 +37,8 @@ safe health mintsXU4/data/valo_node_01_full_year.csv --config docs/health-config
 safe stream mintsXU4/data/valo_node_01_full_year.csv   # alias of `safe health`
 safe periods mintsXU4/data/valo_node_01_full_year.csv -o mintsXU4/output
 python scripts/evaluate_health.py --require-targets   # CI gate; exit 2 if a holdout target fails
-python scripts/generate_synthetic_pm.py --check      # synthetic PM dataset matches its generator
-python scripts/evaluate_synthetic_pm.py              # engine accuracy on the synthetic PM faults
+python scripts/generate_synthetic_pm.py --check      # synthetic PM/PC datasets match their generator
+python scripts/evaluate_synthetic_pm.py              # engine accuracy on the synthetic PM and PC faults
 python mintsXU4/mintsDriftAnalysis.py   # legacy entry points still work
 python mintsXU4/mintsPeriodAnalysis.py
 python dataVisualizer.py
@@ -75,7 +76,8 @@ python dataVisualizer.py
   detectors), and incident scoring with acceptance targets. See
   `docs/health.md` and `docs/evaluation.md`.
 - `safe/synthetic_pm.py`: seeded generator and accuracy evaluation for the
-  synthetic PM dataset. Regenerate the committed files with
+  synthetic PM and PC datasets (counts are primary; PM is derived from them
+  with the IPS7100's fixed mass per particle). Regenerate the committed files with
   `scripts/generate_synthetic_pm.py` after any change, and bump
   `GENERATOR_REVISION`; a test fails if they drift from the generator.
 - `mintsXU4/mintsDriftAnalysis.py`, `mintsXU4/mintsPeriodAnalysis.py`,
@@ -116,7 +118,7 @@ files. Important areas:
   `notifications.jsonl` append on reuse — use a fresh directory for an
   independent replay)
 - Health evaluation reports: `evaluation_output/health/`,
-  `evaluation_output/synthetic_pm/`
+  `evaluation_output/synthetic_pm/`, `evaluation_output/synthetic_pc/`
 
 ## Coding Guidelines
 

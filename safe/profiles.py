@@ -4,7 +4,11 @@ from dataclasses import asdict, dataclass, fields
 import math
 from typing import Any
 
-from safe.config import HARD_BOUNDS, PM_METRICS
+from safe.config import HARD_BOUNDS, PC_LITERS_PER_SECOND, PC_METRICS, PM_METRICS
+
+
+# Particle-count changes must be at least this fraction of the expected level.
+PC_STEP_MIN_RELATIVE = 0.5
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,15 @@ class MetricProfile:
     outlier_threshold: float = 6
     residual_scale_floor: float = 0.3
     step_min_effect: float = 2
+    # Effects must also reach this fraction of the expected level, for metrics
+    # spanning orders of magnitude (particle counts): an absolute step of 5 is
+    # noise at 100,000/L and a large change at 2/L. 0 keeps the absolute limit only.
+    step_min_relative: float = 0
+    # Liters of air behind each reported count value. When positive, the residual
+    # scale is at least the counting (Poisson) noise sqrt(expected / liters), so
+    # sparse count channels reading 0-10 do not turn counting noise into
+    # six-sigma residuals. 0 disables the counting floor.
+    count_liters: float = 0
     step_readings: int = 8
     # Sustained disagreement with a reference beyond this calibration tolerance
     # is reported as drift. Only evaluated when a reference is supplied: a single
@@ -44,6 +57,13 @@ class MetricProfile:
     # much. 0 never treats a zero run as stuck.
     stuck_zero_min_expected: float = 0
     gap_factor: float = 3
+    # A silence is missing data only once it lasts gap_factor intervals and at
+    # least min_gap_seconds of wall-clock time, and detector state (freeze, step,
+    # residual, and reference histories) is only discarded after reset_gap_seconds.
+    # At the 300 s cadence both equal gap_factor x interval (900 s); at 1 s a
+    # 3-second hiccup is neither an outage nor a reason to forget the signal.
+    min_gap_seconds: float = 600
+    reset_gap_seconds: float = 900
     completeness_window_seconds: float = 86400
     minimum_completeness: float = 0.8
     recovery_seconds: float = 1800
@@ -65,7 +85,8 @@ class MetricProfile:
                          "persistence_evaluations", "max_samples"}
         boolean_names = {"freeze_at_startup", "enable_page_hinkley", "stationary_residuals"}
         nonnegative = {"freeze_tolerance", "seasonal_rate_per_day", "reference_ratio_floor",
-                       "reference_drift_relative_tolerance", "stuck_zero_min_expected"}
+                       "reference_drift_relative_tolerance", "stuck_zero_min_expected",
+                       "step_min_relative", "count_liters", "min_gap_seconds", "reset_gap_seconds"}
         for f in fields(self):
             value = getattr(self, f.name)
             if f.name == "hard_bounds":
@@ -101,6 +122,24 @@ class MetricProfile:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def gap_alert_seconds(self) -> float:
+        """Silence that counts as missing data."""
+        return max(self.gap_factor * self.expected_interval_seconds, self.min_gap_seconds)
+
+    def gap_reset_seconds(self) -> float:
+        """Silence after which detector state no longer describes the signal."""
+        return max(self.gap_alert_seconds(), self.reset_gap_seconds)
+
+    def min_effect(self, level: float) -> float:
+        """Smallest practically significant change at this expected level."""
+        return max(self.step_min_effect, self.step_min_relative * abs(level))
+
+    def scale_floor(self, level: float) -> float:
+        """Smallest residual scale at this expected level, including counting noise."""
+        if self.count_liters and level > 0:
+            return max(self.residual_scale_floor, math.sqrt(level / self.count_liters))
+        return self.residual_scale_floor
+
 
 def metric_profile(metric: str, deployment: str = "outdoor",
                    expected_interval_seconds: float = 300) -> MetricProfile:
@@ -124,6 +163,9 @@ def metric_profile(metric: str, deployment: str = "outdoor",
                        reference_ratio_floor=1, reference_drift_relative_tolerance=0.15)
         if metric in PM_METRICS:
             options.update(stuck_zero_min_expected=2)
+        elif metric in PC_METRICS and isinstance(expected_interval_seconds, (int, float)):
+            options.update(step_min_relative=PC_STEP_MIN_RELATIVE,
+                           count_liters=expected_interval_seconds * PC_LITERS_PER_SECOND)
     elif metric == "shuntVoltage":
         options.update(residual_scale_floor=0.001, step_min_effect=0.005,
                        freeze_tolerance=0.000001, seasonal_rate_per_day=0.001,

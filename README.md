@@ -236,7 +236,9 @@ See [`scripts.md`](scripts.md) for a fuller one-second-data workflow.
 - [`tests/`](tests/) — tests for the health engine, statistics, loader, and reports.
 - [`mintsXU4/`](mintsXU4/) — compatibility shims, legacy live-node tools, and
   high-resolution PM utilities.
-- [`mintsXU4/data/synthetic_pm/`](mintsXU4/data/synthetic_pm/) — seeded synthetic PM
-  test dataset with labeled faults ([guide](docs/synthetic-pm.md)); large
+- [`mintsXU4/data/synthetic_pm/`](mintsXU4/data/synthetic_pm/) and
+  [`mintsXU4/data/synthetic_pc/`](mintsXU4/data/synthetic_pc/) — seeded synthetic PM
+  and particle-count test datasets, fitted to the field data, with labeled faults
+  ([guide](docs/synthetic-pm.md)); large
   one-second source files are intentionally ignored by Git.
 - [`mintsXU4/output/`](mintsXU4/output/) — generated analysis artifacts.

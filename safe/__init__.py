@@ -19,7 +19,7 @@ from safe.health import PageHinkley, SensorHealth
 from safe.incidents import HealthEvent
 from safe.profiles import MetricProfile, ProfileRegistry, SensorRules
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 __all__ = [
     "HARD_BOUNDS",
